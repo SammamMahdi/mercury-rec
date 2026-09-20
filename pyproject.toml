@@ -163,7 +163,7 @@ exclude = ["^build/", "^dist/"]
 
 [[tool.mypy.overrides]]
 # These ship no type information.
-module = ["faiss.*", "lightgbm.*", "shap.*", "umap.*", "mlflow.*", "sklearn.*", "pandera.*"]
+module = ["faiss.*", "lightgbm.*", "shap.*", "umap.*", "mlflow.*", "sklearn.*", "pandera.*", "scipy.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

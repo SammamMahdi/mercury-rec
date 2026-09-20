@@ -91,7 +91,13 @@ def configure_logging(*, level: str = "INFO", json_output: bool = False) -> None
         wrapper_class=structlog.make_filtering_bound_logger(
             logging.getLevelNamesMapping()[level.upper()]
         ),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        # Must be the stdlib factory: the `structlog.stdlib.*` processors above
+        # (add_logger_name in particular) read attributes that only a stdlib
+        # logger has. Pairing them with PrintLoggerFactory raises
+        # AttributeError: 'PrintLogger' object has no attribute 'name'.
+        # Using the stdlib factory also routes uvicorn, SQLAlchemy and MLflow
+        # output through the same handler, so logs are not half JSON.
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 

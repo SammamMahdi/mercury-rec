@@ -1,0 +1,166 @@
+# ---------------------------------------------------------------------------
+# Data pipeline configuration
+#
+# MercuryRec uses a HYBRID dataset:
+#
+#   REAL       - user/item ids, event types, timestamps, category assignments
+#                and the `available` flag all come from the Retailrocket
+#                ecommerce dataset (CC BY-NC-SA 4.0).
+#   SYNTHESISED - merchants, regions, geography, delivery times, prices and
+#                verticals are generated, because Retailrocket contains none
+#                of them and the platform being modelled requires them.
+#
+# Nothing here invents behaviour. The synthesised attributes are *item and
+# user properties*; every interaction, and its timing, is real. Every
+# generated attribute is a deterministic function of (real id, seed), so the
+# dataset is reproducible from this file plus the raw download.
+#
+# The provenance of each column is recorded in docs/data-card.md and surfaced
+# through the API, so no consumer can mistake a synthesised attribute for an
+# observed one.
+# ---------------------------------------------------------------------------
+
+seed: 42
+
+presets:
+  # Fast loop for development and CI. `make data && make train && make evaluate`
+  # must stay under a few minutes at this size, or the full pipeline stops
+  # being re-run and starts being avoided.
+  demo:
+    max_users: 5_000
+    max_items: 3_000
+    min_user_interactions: 5
+    min_item_interactions: 5
+
+  # Default. Sized so the whole pipeline fits comfortably in RAM on a 16 GB
+  # machine alongside PostgreSQL, Redis and a Next.js dev server.
+  full:
+    max_users: null          # no cap; the k-core filter decides
+    max_items: null
+    min_user_interactions: 5
+    min_item_interactions: 5
+
+# ---------------------------------------------------------------------------
+# k-core filtering
+#
+# Retailrocket is extremely sparse: ~2.76M events across ~1.4M visitors, a
+# median of ~1 event per visitor, and only ~11k visitors who ever transact.
+# Collaborative and neural retrieval models cannot learn a representation from
+# a single observation, so the interaction graph is reduced to its k-core.
+#
+# This is a real and consequential decision, not a cleanup step: it changes
+# what the reported metrics describe. Results are reported on the filtered
+# core, and the filtering effect (users/items/events before and after) is
+# published in docs/data-card.md rather than quietly applied.
+#
+# Applied iteratively, because removing a sparse user can push an item below
+# the item threshold and vice versa.
+# ---------------------------------------------------------------------------
+k_core:
+  enabled: true
+  # Converges at iteration 11 on this dataset; headroom so a threshold
+  # change does not silently hit the cap.
+  max_iterations: 30
+
+# ---------------------------------------------------------------------------
+# Sessionisation
+# ---------------------------------------------------------------------------
+sessions:
+  # A new session starts after this much inactivity. 30 minutes is the long
+  # standing web-analytics convention (it originates with Google Analytics and
+  # is used throughout the session-based recommendation literature), which
+  # makes results comparable to published work rather than idiosyncratic.
+  inactivity_gap_minutes: 30
+  # Guard against pathological bot-like sessions dominating sequence models.
+  max_events_per_session: 500
+
+# ---------------------------------------------------------------------------
+# Time-aware splitting
+#
+# Behavioural data is temporal, so a random split leaks the future into
+# training and inflates every metric. Split points are global timestamps
+# (not per-user), which matches how a deployed system is actually retrained:
+# fit on everything up to now, predict what happens next.
+# ---------------------------------------------------------------------------
+split:
+  strategy: temporal_global
+  train_fraction: 0.70
+  validation_fraction: 0.15
+  # test_fraction is the remainder (0.15), so the three always sum to 1.
+
+  # Evaluation only scores users who have at least one interaction in the
+  # training window; there is nothing to personalise from otherwise. Cold-start
+  # users are evaluated separately, through the cold-start path.
+  require_train_history: true
+
+# ---------------------------------------------------------------------------
+# Synthesised attributes
+# ---------------------------------------------------------------------------
+augmentation:
+  # Retailrocket's category tree is hashed and unlabelled, so categories carry
+  # no semantics. Each ROOT category is assigned to a vertical by a seeded
+  # deterministic hash, and every descendant inherits it. This keeps a
+  # category's items together in one vertical - which is what makes
+  # vertical-level features and diversity constraints meaningful - without
+  # claiming to know what any category actually contains.
+  verticals:
+    weights:
+      food_delivery: 0.22
+      restaurant: 0.18
+      grocery: 0.25
+      pharmacy: 0.10
+      commerce: 0.15
+      lifestyle: 0.10
+
+  regions:
+    count: 12
+    # Zipf-distributed population: real marketplaces concentrate demand in a
+    # few metros rather than spreading it evenly, and that concentration is
+    # what makes regional popularity a useful cold-start signal at all.
+    population_zipf_s: 1.1
+
+  merchants:
+    # Merchants per vertical. Items are assigned to a merchant within their
+    # own vertical, so merchant diversity constraints in the reranker operate
+    # on a coherent notion of "another merchant selling the same kind of thing".
+    count_per_vertical: 120
+    rating_beta_a: 8.0      # Beta(8,2) on [0,5] -> mean ~4.0, left tail.
+    rating_beta_b: 2.0      # Matches observed marketplace rating skew.
+    delivery_radius_km: { min: 2.0, max: 15.0 }
+    delivery_minutes: { min: 15, max: 75 }
+
+  prices:
+    # Log-normal per vertical: prices are positive, right-skewed and
+    # multiplicative, which is exactly what a log-normal models. Parameters
+    # are mu/sigma of the underlying normal, chosen so the medians are
+    # plausible for each vertical.
+    #
+    # These are illustrative magnitudes, NOT recovered from data -
+    # Retailrocket's price property is hashed and unusable. Documented as
+    # synthetic in the data card.
+    lognormal:
+      food_delivery: { mu: 2.5, sigma: 0.5 }   # median ~12
+      restaurant:    { mu: 3.0, sigma: 0.6 }   # median ~20
+      grocery:       { mu: 1.6, sigma: 0.7 }   # median ~5
+      pharmacy:      { mu: 2.2, sigma: 0.6 }   # median ~9
+      commerce:      { mu: 3.4, sigma: 0.9 }   # median ~30
+      lifestyle:     { mu: 3.1, sigma: 1.0 }   # median ~22
+    min_price: 0.99
+
+  cold_start:
+    # Items whose first interaction falls in the final window are genuinely
+    # cold at serving time - no synthetic marking required. This threshold
+    # decides which of them count as cold for sliced evaluation.
+    item_first_seen_within_days: 14
+    user_first_seen_within_days: 14
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+output:
+  # Partitioned by event date. Keeps the directory layout shallow (Windows
+  # MAX_PATH) while allowing day-chunked feature computation that never loads
+  # the whole interaction frame at once.
+  partition_by: event_date
+  compression: zstd
+  row_group_size: 200_000

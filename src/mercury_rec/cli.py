@@ -158,5 +158,40 @@ def data_download(
         console.print(f"  {name:<28} {path.stat().st_size / 1024**2:>8.1f} MB")
 
 
+@data_app.command("build")
+def data_build(
+    preset: Annotated[
+        str, typer.Option("--preset", "-p", help="Dataset preset: 'demo' or 'full'.")
+    ] = "full",
+    force_download: Annotated[
+        bool, typer.Option("--force-download", help="Re-fetch the raw dataset first.")
+    ] = False,
+) -> None:
+    """Build the processed dataset: ingest, validate, augment, sessionise, split."""
+    from mercury_rec.pipelines.build_data import build_dataset
+
+    result = build_dataset(preset=preset, force_download=force_download)
+    meta = result.metadata
+    ingest_stats = meta["ingest"]
+    split_stats = meta["split"]
+
+    console.print(f"\n[green]Dataset built[/green] in {result.elapsed_seconds:.1f}s")
+    console.print(f"  output        {result.output_dir}")
+    console.print(f"  dataset hash  {meta['dataset_hash']}")
+    console.print(
+        f"  events        {ingest_stats['raw_events']:,} raw "
+        f"-> {ingest_stats['final_events']:,} after k-core "
+        f"({ingest_stats['retained_event_fraction']:.1%} retained)"
+    )
+    console.print(
+        f"  users/items   {ingest_stats['final_users']:,} users, "
+        f"{ingest_stats['final_items']:,} items"
+    )
+    console.print(
+        f"  split         train {split_stats['train_events']:,} / "
+        f"val {split_stats['validation_events']:,} / test {split_stats['test_events']:,}"
+    )
+
+
 if __name__ == "__main__":
     app()
