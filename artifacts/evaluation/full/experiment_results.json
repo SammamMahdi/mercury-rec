@@ -1,0 +1,123 @@
+{
+  "generated_at": "2026-09-20T12:04:35.755682+00:00",
+  "preset": "full",
+  "dataset_hash": "c38478b5cb894be4",
+  "k": 10,
+  "simulation": {
+    "control": "popularity",
+    "treatment": "bpr_mf",
+    "n_users": 3022,
+    "bootstrap_samples": 2000,
+    "is_simulated": true,
+    "disclaimer": "Offline counterfactual evaluation on logged interactions. No live users were served. Measures whether a ranking places already-observed engagement higher, NOT whether engagement would have increased - the log only contains outcomes for what the production system actually showed.",
+    "metrics": [
+      {
+        "metric": "ndcg@10",
+        "control": 0.004984,
+        "treatment": 0.021544,
+        "absolute_lift": 0.016561,
+        "relative_lift_pct": 332.304,
+        "ci_95": [
+          0.012535,
+          0.020775
+        ],
+        "p_value": 0.001,
+        "is_significant": true,
+        "n_users": 3022
+      },
+      {
+        "metric": "recall@10",
+        "control": 0.005689,
+        "treatment": 0.029976,
+        "absolute_lift": 0.024286,
+        "relative_lift_pct": 426.876,
+        "ci_95": [
+          0.018903,
+          0.029924
+        ],
+        "p_value": 0.001,
+        "is_significant": true,
+        "n_users": 3022
+      },
+      {
+        "metric": "precision@10",
+        "control": 0.00182,
+        "treatment": 0.007148,
+        "absolute_lift": 0.005328,
+        "relative_lift_pct": 292.727,
+        "ci_95": [
+          0.004236,
+          0.006486
+        ],
+        "p_value": 0.001,
+        "is_significant": true,
+        "n_users": 3022
+      },
+      {
+        "metric": "hit_rate@10",
+        "control": 0.016876,
+        "treatment": 0.059563,
+        "absolute_lift": 0.042687,
+        "relative_lift_pct": 252.941,
+        "ci_95": [
+          0.033752,
+          0.051952
+        ],
+        "p_value": 0.001,
+        "is_significant": true,
+        "n_users": 3022
+      }
+    ]
+  },
+  "gate": {
+    "promoted": true,
+    "candidate": "bpr_mf",
+    "incumbent": "popularity",
+    "n_failures": 0,
+    "n_inconclusive": 0,
+    "checks": [
+      {
+        "name": "primary_metric[ndcg@10]",
+        "verdict": "pass",
+        "detail": "+332.26% vs incumbent (allowed: -2%)",
+        "candidate": 0.021544,
+        "incumbent": 0.004984,
+        "threshold": -0.02
+      },
+      {
+        "name": "coverage_floor",
+        "verdict": "pass",
+        "detail": "serves 30.7% of the catalogue (floor 5%)",
+        "candidate": 0.307347,
+        "incumbent": null,
+        "threshold": 0.05
+      },
+      {
+        "name": "coverage_regression",
+        "verdict": "pass",
+        "detail": "+20807.96% vs incumbent",
+        "candidate": 0.307347,
+        "incumbent": 0.00147,
+        "threshold": -0.25
+      },
+      {
+        "name": "popularity_bias",
+        "verdict": "pass",
+        "detail": "gini 0.615 (ceiling 0.95)",
+        "candidate": 0.614567,
+        "incumbent": null,
+        "threshold": 0.95
+      },
+      {
+        "name": "latency_budget",
+        "verdict": "pass",
+        "detail": "2.22ms (budget 150.0ms)",
+        "candidate": 2.2217,
+        "incumbent": null,
+        "threshold": 150.0
+      }
+    ],
+    "summary": "PROMOTE bpr_mf: all 5 checks passed."
+  },
+  "elapsed_seconds": 18.04
+}

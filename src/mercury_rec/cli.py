@@ -285,5 +285,45 @@ def train_ranker_command(
     console.print(f"[green]Saved[/green] {result.output_path}")
 
 
+@train_app.command("experiment")
+def run_experiment_command(
+    preset: Annotated[str, typer.Option("--preset", "-p")] = "full",
+    control: Annotated[str, typer.Option("--control", help="Baseline variant.")] = "popularity",
+    treatment: Annotated[str, typer.Option("--treatment", help="Candidate variant.")] = "bpr_mf",
+    no_track: Annotated[bool, typer.Option("--no-track", help="Skip MLflow logging.")] = False,
+) -> None:
+    """Run the offline A/B simulation and the promotion gate."""
+    from mercury_rec.pipelines.run_experiment import run_experiment
+
+    result = run_experiment(preset=preset, control=control, treatment=treatment, track=not no_track)
+    sim = result.payload["simulation"]
+
+    console.print(
+        f"[bold yellow]OFFLINE SIMULATION[/bold yellow] - no live users. "
+        f"{sim['control']} vs {sim['treatment']}, n={sim['n_users']:,}"
+    )
+    header = (
+        f"{'metric':<16}{'control':>10}{'treatment':>11}{'lift':>10}{'95% CI':>22}{'signif':>8}"
+    )
+    console.print(header)
+    console.print("-" * len(header))
+    for m in sim["metrics"]:
+        ci = f"[{m['ci_95'][0]:+.4f}, {m['ci_95'][1]:+.4f}]"
+        console.print(
+            f"{m['metric']:<16}{m['control']:>10.4f}{m['treatment']:>11.4f}"
+            f"{m['relative_lift_pct']:>9.1f}%{ci:>22}{'yes' if m['is_significant'] else 'no':>8}"
+        )
+
+    gate = result.payload.get("gate") or {}
+    if gate:
+        console.print()
+        verdict = "[green]PROMOTE[/green]" if gate["promoted"] else "[red]REJECT[/red]"
+        console.print(f"Gate: {verdict}")
+        for check in gate["checks"]:
+            mark = {"pass": "ok  ", "fail": "FAIL", "inconclusive": "????"}[check["verdict"]]
+            console.print(f"  {mark} {check['name']:<28} {check['detail']}")
+    console.print(f"[green]Saved[/green] {result.output_path}")
+
+
 if __name__ == "__main__":
     app()
