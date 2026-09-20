@@ -45,12 +45,18 @@ data_app = typer.Typer(
     name="data", help="Dataset acquisition and preparation.", no_args_is_help=True
 )
 features_app = typer.Typer(name="features", help="Feature engineering.", no_args_is_help=True)
+viz_app = typer.Typer(name="viz", help="Visualisation artifacts.", no_args_is_help=True)
+monitor_app = typer.Typer(
+    name="monitor", help="Drift and serving observability.", no_args_is_help=True
+)
 train_app = typer.Typer(name="train", help="Model training and evaluation.", no_args_is_help=True)
 
 app.add_typer(env_app)
 app.add_typer(data_app)
 app.add_typer(features_app)
 app.add_typer(train_app)
+app.add_typer(viz_app)
+app.add_typer(monitor_app)
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -325,5 +331,42 @@ def run_experiment_command(
     console.print(f"[green]Saved[/green] {result.output_path}")
 
 
+@viz_app.command("project")
+def viz_project(
+    preset: Annotated[str, typer.Option("--preset", "-p")] = "full",
+    max_points: Annotated[int, typer.Option("--max-points")] = 6000,
+) -> None:
+    """Project item embeddings to 3D for the Recommendation Galaxy."""
+    from mercury_rec.pipelines.project_embeddings import project_embeddings
+
+    result = project_embeddings(preset=preset, max_points=max_points)
+    console.print(
+        f"[green]Projection built[/green] {result.n_points:,} points "
+        f"via {result.method} in {result.elapsed_seconds:.1f}s"
+    )
+    console.print(f"  {result.output_path}")
+
+
 if __name__ == "__main__":
     app()
+
+
+@monitor_app.command("drift")
+def monitor_drift_command(
+    preset: Annotated[str, typer.Option("--preset", "-p")] = "full",
+    reference: Annotated[str, typer.Option("--reference")] = "train",
+    current: Annotated[str, typer.Option("--current")] = "test",
+    bins: Annotated[int, typer.Option("--bins")] = 10,
+) -> None:
+    """Measure feature drift between two time windows."""
+    from mercury_rec.pipelines.monitor_drift import monitor_drift
+
+    report = monitor_drift(
+        preset=preset, reference_split=reference, current_split=current, bins=bins
+    )
+    colour = "red" if report.n_major else ("yellow" if report.n_minor else "green")
+    console.print(
+        f"[{colour}]Drift report[/{colour}] {report.n_features} features · "
+        f"{report.n_major} major · {report.n_minor} minor"
+    )
+    console.print(f"  {report.output_path}")

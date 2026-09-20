@@ -22,6 +22,10 @@
 /artifacts/evaluation/**/*.pkl
 /artifacts/evaluation/**/*.npy
 /artifacts/evaluation/**/*.pt
+# Drift reports are committed for the same reason: the monitoring page quotes
+# them, so they have to be traceable to a file rather than to a run nobody
+# else can reproduce.
+!/artifacts/monitoring/
 /mlruns/
 mlflow.db
 *.pt

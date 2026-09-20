@@ -1,0 +1,238 @@
+{
+  "generated_at": "2026-09-20T15:24:09.807591+00:00",
+  "preset": "full",
+  "reference_split": "train",
+  "current_split": "test",
+  "reference_rows": 250000,
+  "current_rows": 22007,
+  "bins": 10,
+  "thresholds": {
+    "minor": 0.1,
+    "major": 0.25
+  },
+  "note": "Drift is measured between the training window and the held-out window that follows it in calendar time. There is no production traffic behind this system, so this is the only genuine later data available - and it is real data, not simulated drift.",
+  "interpretation": "PSI below 0.10 is conventionally read as stable, 0.10-0.25 as a minor shift and above 0.25 as a major one. Those thresholds are an industry rule of thumb, not a property of this dataset. A shifted feature is a prompt to investigate, not evidence that the model degraded.",
+  "expected_drift": "Time-indexed features drift here BY CONSTRUCTION. The split is chronological, so users in the later window are necessarily older (user_tenure_days) and items have necessarily existed longer (item_age_days). A large PSI on those is the split working, not a fault. The features worth reading as signal are the ones with no mechanical reason to move - affinities, conversion rates and price levels.",
+  "features": [
+    {
+      "feature": "user_tenure_days",
+      "psi": 10.92353,
+      "ks_statistic": 0.831052,
+      "js_divergence": 0.659403,
+      "reference_mean": 11.535917,
+      "current_mean": 85.352043,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "major"
+    },
+    {
+      "feature": "item_age_days",
+      "psi": 2.189945,
+      "ks_statistic": 0.694309,
+      "js_divergence": 0.347759,
+      "reference_mean": 50.004886,
+      "current_mean": 93.252773,
+      "reference_n": 244354,
+      "current_n": 21497,
+      "severity": "major"
+    },
+    {
+      "feature": "user_event_count",
+      "psi": 1.409687,
+      "ks_statistic": 0.308221,
+      "js_divergence": 0.124892,
+      "reference_mean": 121.908652,
+      "current_mean": 636.328123,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "major"
+    },
+    {
+      "feature": "user_distinct_items",
+      "psi": 1.274106,
+      "ks_statistic": 0.287545,
+      "js_divergence": 0.103811,
+      "reference_mean": 67.219028,
+      "current_mean": 331.07334,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "major"
+    },
+    {
+      "feature": "item_days_since_last",
+      "psi": 0.445727,
+      "ks_statistic": 0.272444,
+      "js_divergence": 0.076544,
+      "reference_mean": 3.878354,
+      "current_mean": 14.541828,
+      "reference_n": 244354,
+      "current_n": 21497,
+      "severity": "major"
+    },
+    {
+      "feature": "user_category_affinity",
+      "psi": 0.420856,
+      "ks_statistic": 0.37395,
+      "js_divergence": 0.074304,
+      "reference_mean": 0.794301,
+      "current_mean": 0.598183,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "major"
+    },
+    {
+      "feature": "ui_days_since_last",
+      "psi": 0.255684,
+      "ks_statistic": 0.205695,
+      "js_divergence": 0.044731,
+      "reference_mean": 1.396182,
+      "current_mean": 8.256296,
+      "reference_n": 117479,
+      "current_n": 10414,
+      "severity": "major"
+    },
+    {
+      "feature": "user_days_since_last",
+      "psi": 0.234125,
+      "ks_statistic": 0.198128,
+      "js_divergence": 0.041016,
+      "reference_mean": 1.113091,
+      "current_mean": 8.068368,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "minor"
+    },
+    {
+      "feature": "user_avg_order_value",
+      "psi": 0.217364,
+      "ks_statistic": 0.146284,
+      "js_divergence": 0.038329,
+      "reference_mean": 17.035001,
+      "current_mean": 17.523766,
+      "reference_n": 42701,
+      "current_n": 6770,
+      "severity": "minor"
+    },
+    {
+      "feature": "user_merchant_affinity",
+      "psi": 0.11939,
+      "ks_statistic": 0.139629,
+      "js_divergence": 0.021254,
+      "reference_mean": 0.227112,
+      "current_mean": 0.137014,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "minor"
+    },
+    {
+      "feature": "user_avg_interaction_price",
+      "psi": 0.096275,
+      "ks_statistic": 0.079895,
+      "js_divergence": 0.017205,
+      "reference_mean": 18.573727,
+      "current_mean": 18.467589,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "user_purchase_count",
+      "psi": 0.053686,
+      "ks_statistic": 0.136825,
+      "js_divergence": 0.009566,
+      "reference_mean": 6.894856,
+      "current_mean": 35.100241,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "price_ratio_to_user_avg",
+      "psi": 0.052188,
+      "ks_statistic": 0.079365,
+      "js_divergence": 0.009353,
+      "reference_mean": 1.144218,
+      "current_mean": 1.127838,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "ui_prior_events",
+      "psi": 0.021501,
+      "ks_statistic": 0.046468,
+      "js_divergence": 0.00386,
+      "reference_mean": 2.233248,
+      "current_mean": 5.728995,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "user_conversion_rate",
+      "psi": 0.019528,
+      "ks_statistic": 0.121839,
+      "js_divergence": 0.003504,
+      "reference_mean": 0.01401,
+      "current_mean": 0.01899,
+      "reference_n": 229834,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "item_event_count",
+      "psi": 0.009613,
+      "ks_statistic": 0.035475,
+      "js_divergence": 0.001729,
+      "reference_mean": 38.861012,
+      "current_mean": 45.639115,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "item_conversion_rate",
+      "psi": 0.001356,
+      "ks_statistic": 0.01328,
+      "js_divergence": 0.000244,
+      "reference_mean": 0.017964,
+      "current_mean": 0.017092,
+      "reference_n": 244354,
+      "current_n": 21497,
+      "severity": "stable"
+    },
+    {
+      "feature": "item_distinct_users",
+      "psi": 0.001084,
+      "ks_statistic": 0.011632,
+      "js_divergence": 0.000196,
+      "reference_mean": 18.809976,
+      "current_mean": 19.940337,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "item_purchase_count",
+      "psi": 0.000759,
+      "ks_statistic": 0.010883,
+      "js_divergence": 0.000137,
+      "reference_mean": 0.94994,
+      "current_mean": 1.09856,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    },
+    {
+      "feature": "ui_prior_purchases",
+      "psi": 0.0,
+      "ks_statistic": 0.004929,
+      "js_divergence": 0.0,
+      "reference_mean": 0.022972,
+      "current_mean": 0.031445,
+      "reference_n": 250000,
+      "current_n": 22007,
+      "severity": "stable"
+    }
+  ]
+}
