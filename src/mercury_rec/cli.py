@@ -249,5 +249,41 @@ def train_baselines(
     console.print(f"\n[green]Saved[/green] {result.output_path}")
 
 
+@train_app.command("ranker")
+def train_ranker_command(
+    preset: Annotated[str, typer.Option("--preset", "-p", help="Dataset preset.")] = "full",
+    quick: Annotated[bool, typer.Option("--quick", help="Short training (smoke test).")] = False,
+    max_train_users: Annotated[
+        int, typer.Option("--max-train-users", help="Cap users used to build the ranker set.")
+    ] = 4000,
+) -> None:
+    """Train the ranker on real retrieval output and score the full pipeline."""
+    from mercury_rec.pipelines.train_ranker import run_ranker_pipeline
+
+    result = run_ranker_pipeline(preset=preset, quick=quick, max_train_users=max_train_users)
+    payload = result.payload
+
+    retrieval = payload["retrieval"]
+    console.print(
+        f"[bold]Retrieval ceiling[/bold]  recall@{retrieval['max_candidates']} candidates = "
+        f"{retrieval['mean_recall_at_candidates_test']:.4f}"
+    )
+    console.print(
+        f"[bold]Ranker[/bold]  {payload['ranker']['train_groups']:,} groups, "
+        f"best_iteration={payload['ranker']['best_iteration']}"
+    )
+    console.print()
+    header = f"{'stage':<28}{'R@10':>9}{'NDCG@10':>10}{'MAP@10':>9}{'HR@10':>9}{'cov':>8}"
+    console.print(header)
+    console.print("-" * len(header))
+    for name, metrics in payload["stages"].items():
+        console.print(
+            f"{name:<28}{metrics['recall@10']:>9.4f}{metrics['ndcg@10']:>10.4f}"
+            f"{metrics['map@10']:>9.4f}{metrics['hit_rate@10']:>9.4f}"
+            f"{metrics['catalog_coverage']:>8.3f}"
+        )
+    console.print(f"[green]Saved[/green] {result.output_path}")
+
+
 if __name__ == "__main__":
     app()

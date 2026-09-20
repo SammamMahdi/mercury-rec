@@ -50,6 +50,7 @@ RETRIEVAL_FEATURES: tuple[str, ...] = (
     "retrieval_score_two_tower",
     "retrieval_score_item_cf",
     "retrieval_score_popularity",
+    "retrieval_score_matrix_factorization",
     "retrieval_rank_fused",
     "retrieval_n_sources",
 )
@@ -211,7 +212,7 @@ def fuse_candidate_scores(
 
     items = sorted(fused, key=lambda item: -fused[item])
     frame = pd.DataFrame({"item_id": items})
-    for source in ("two_tower", "item_cf", "popularity"):
+    for source in ("two_tower", "item_cf", "popularity", "matrix_factorization"):
         scores = source_scores.get(source, {})
         frame[f"retrieval_score_{source}"] = [scores.get(item, np.nan) for item in items]
     frame["retrieval_rank_fused"] = np.arange(1, len(items) + 1, dtype=np.float32)

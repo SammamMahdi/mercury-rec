@@ -45,6 +45,7 @@ from mercury_rec.evaluation.metrics import DEFAULT_K_VALUES, evaluate_recommenda
 from mercury_rec.features.asof import FEATURE_COLUMNS
 from mercury_rec.models.base import RecommendationContext
 from mercury_rec.models.item_cf import ItemCFRecommender
+from mercury_rec.models.mf import BPRRecommender
 from mercury_rec.models.popularity import PopularityRecommender
 from mercury_rec.models.ranking.dataset import RANKING_FEATURES, build_ranking_dataset
 from mercury_rec.models.ranking.ranker import LambdaRanker, RankerConfig
@@ -76,6 +77,7 @@ class _Retrievers:
 
     popularity: PopularityRecommender
     item_cf: ItemCFRecommender
+    matrix_factorization: BPRRecommender
     two_tower: TwoTowerRecommender
     user_embeddings: dict[int, np.ndarray]
 
@@ -121,6 +123,22 @@ def _generate_candidates(
         retrieve_from_scores(
             cf_scores,
             source=RetrievalSource.ITEM_CF,
+            k=per_source_k,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+    )
+
+    # BPR is the strongest single retriever measured (Recall@10 0.0300 vs
+    # 0.0204 for the two-tower), so excluding it from fusion capped the
+    # retrieval ceiling at 0.1321 and bounded the whole pipeline.
+    started = time.perf_counter()
+    mf_scores = retrievers.matrix_factorization._score(
+        user_id, np.arange(retrievers.matrix_factorization.n_items), _EMPTY_CONTEXT
+    )
+    results.append(
+        retrieve_from_scores(
+            mf_scores,
+            source=RetrievalSource.MATRIX_FACTORIZATION,
             k=per_source_k,
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
         )
@@ -188,7 +206,7 @@ def _candidate_frame(
             for name in FEATURE_COLUMNS:
                 frame[name] = np.nan
 
-        for source in ("two_tower", "item_cf", "popularity"):
+        for source in ("two_tower", "item_cf", "popularity", "matrix_factorization"):
             frame[f"retrieval_score_{source}"] = candidates.per_source_scores.get(
                 source, np.full(len(candidates), np.nan, dtype=np.float32)
             )
@@ -207,7 +225,7 @@ def run_ranker_pipeline(
     data_dir: Path | None = None,
     artifacts_dir: Path | None = None,
     per_source_k: int = 200,
-    max_candidates: int = 400,
+    max_candidates: int = 600,
     max_train_users: int = 4000,
     quick: bool = False,
 ) -> RankerPipelineResult:
@@ -240,6 +258,8 @@ def run_ranker_pipeline(
     popularity.fit(train)
     item_cf = ItemCFRecommender(n_users, n_items)
     item_cf.fit(train)
+    matrix_factorization = BPRRecommender(n_users, n_items, epochs=5 if quick else 30)
+    matrix_factorization.fit(train)
     two_tower = TwoTowerRecommender(
         n_users,
         n_items,
@@ -269,6 +289,7 @@ def run_ranker_pipeline(
     retrievers = _Retrievers(
         popularity=popularity,
         item_cf=item_cf,
+        matrix_factorization=matrix_factorization,
         two_tower=two_tower,
         user_embeddings={
             int(uid): vec

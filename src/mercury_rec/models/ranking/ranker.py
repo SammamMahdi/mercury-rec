@@ -254,6 +254,47 @@ class LambdaRanker:
             explanations.append({self.feature_names[i]: round(float(row[i]), 6) for i in ordered})
         return explanations
 
+    def warmup(self) -> dict[str, float]:
+        """Pay the one-time initialisation costs before serving traffic.
+
+        Two lazy costs otherwise land on whichever request arrives first:
+
+        - ``shap.TreeExplainer`` walks the whole ensemble when constructed.
+          Measured at ~900 ms for this 500-tree model, against ~2.7 ms for a
+          warm explanation of three items.
+        - LightGBM allocates its prediction buffers on the first ``predict``.
+
+        Together they made the first request's ranking stage take 2.8 seconds
+        while every later one took single-digit milliseconds - a cold-start
+        cliff that a p99 latency target would catch only after deploy. Calling
+        this at startup moves the cost out of the request path entirely.
+
+        Returns the measured warm-up cost per component, which is logged so a
+        regression in it is visible.
+        """
+        import time
+
+        self._require_fitted()
+        timings: dict[str, float] = {}
+        probe = np.zeros((1, len(self.feature_names)), dtype=np.float32)
+
+        started = time.perf_counter()
+        self.score(probe)
+        timings["predict_ms"] = (time.perf_counter() - started) * 1000.0
+
+        started = time.perf_counter()
+        try:
+            self.explain(probe, top_n=1)
+            timings["explainer_ms"] = (time.perf_counter() - started) * 1000.0
+        except Exception as exc:  # noqa: BLE001
+            # Explanations are optional; a service that cannot build them
+            # should still serve recommendations.
+            logger.warning("ranker.warmup_explainer_failed", error=str(exc)[:120])
+            timings["explainer_ms"] = -1.0
+
+        logger.info("ranker.warmup", **{k: round(v, 2) for k, v in timings.items()})
+        return timings
+
     def save(self, path: Path) -> None:
         self._require_fitted()
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -138,6 +138,7 @@ select = [
     "ANN",       # type annotations
     "S",         # bandit
     "T20",       # no print() in library code
+    "BLE",      # no blind except without justification
 ]
 ignore = [
     "ANN401",  # allow typing.Any where genuinely needed
@@ -147,6 +148,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S", "T20"]
+# The cache is fail-open BY DESIGN: a Redis outage must degrade latency, not
+# availability. Every handler there catches broadly, counts the failure and
+# continues, which is the documented behaviour of the module rather than an
+# oversight. See the module docstring.
+"src/mercury_rec/cache/redis_cache.py" = ["BLE001"]
 "scripts/**" = ["T20"]
 "src/mercury_rec/cli.py" = ["T20"]
 
