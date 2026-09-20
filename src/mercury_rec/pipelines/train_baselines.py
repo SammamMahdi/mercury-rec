@@ -34,6 +34,15 @@ from mercury_rec.models.popularity import (
     PopularityRecommender,
     TrendingRecommender,
 )
+from mercury_rec.models.two_tower.model import TwoTowerConfig
+from mercury_rec.models.two_tower.recommender import TwoTowerRecommender
+from mercury_rec.retrieval.index import (
+    ExactIndex,
+    FlatIPIndex,
+    HNSWIndex,
+    benchmark_index,
+    save_embeddings,
+)
 
 logger = get_logger(__name__)
 
@@ -58,6 +67,40 @@ def _build_models(n_users: int, n_items: int, *, quick: bool) -> list[Recommende
         ItemCFRecommender(n_users, n_items),
         BPRRecommender(n_users, n_items, epochs=5 if quick else 30),
     ]
+
+
+def _benchmark_indexes(
+    embeddings: Any,
+    model: TwoTowerRecommender,
+    entering: pd.DataFrame,
+    *,
+    n_queries: int = 200,
+    k: int = 100,
+) -> list[dict[str, Any]]:
+    """Measure exact vs approximate retrieval on the real embeddings.
+
+    Exact search is measured first and its results are the ground truth the
+    approximate index's recall is computed against. At this catalogue size
+    exact search is expected to be competitive; the benchmark exists to show
+    where that stops being true rather than to imply ANN was required.
+    """
+    queries = model.encode_users(entering.head(n_queries))
+    if len(queries) == 0:
+        return []
+
+    exact = ExactIndex()
+    exact_result = benchmark_index(exact, embeddings, queries, k=k)
+    _, exact_ids = exact.search(queries, k)
+
+    benchmarks = [exact_result.as_dict()]
+    for index in (FlatIPIndex(), HNSWIndex()):
+        try:
+            benchmarks.append(
+                benchmark_index(index, embeddings, queries, k=k, exact_ids=exact_ids).as_dict()
+            )
+        except (ImportError, OSError, RuntimeError) as exc:
+            logger.warning("baselines.index_failed", index=index.name, error=str(exc)[:120])
+    return benchmarks
 
 
 def run_baselines(
@@ -109,6 +152,56 @@ def run_baselines(
             }
         )
 
+    # --- two-tower -------------------------------------------------------
+    # Trained separately because it consumes as-of FEATURE rows rather than
+    # raw interactions: each example must carry the aggregates as they stood
+    # immediately before that event, which is exactly what serving will hand it.
+    index_benchmarks: list[dict[str, Any]] = []
+    feature_dir = (artifacts_dir or Path("artifacts")) / "features" / preset
+    if (feature_dir / "features_train.parquet").is_file():
+        users = pd.read_parquet(processed_dir / "users.parquet")
+        train_features = pd.read_parquet(feature_dir / "features_train.parquet")
+        eval_features = pd.read_parquet(feature_dir / f"features_{split}.parquet")
+
+        two_tower = TwoTowerRecommender(
+            n_users,
+            n_items,
+            items=items,
+            users=users,
+            config=TwoTowerConfig(epochs=5 if quick else 25),
+        )
+        logger.info("baselines.fit", model=two_tower.name)
+        fit_result = two_tower.fit(train_features)
+
+        # A user's state ENTERING the evaluation window is their first
+        # evaluation-window feature row - the aggregates as of just before
+        # their first held-out event, which is what a live request would see.
+        entering = eval_features.sort_values("ts").drop_duplicates("user_id", keep="first")
+        two_tower.set_user_embeddings(
+            entering["user_id"].to_numpy(), two_tower.encode_users(entering)
+        )
+
+        result, per_user_ms = evaluate_model(two_tower, data, k_values=DEFAULT_K_VALUES)
+        rows.append(
+            {
+                **result.as_dict(),
+                "train_seconds": round(fit_result.train_seconds, 3),
+                "scoring_ms_per_user": round(per_user_ms, 4),
+                "params": fit_result.params,
+                "fit_extra": fit_result.extra,
+            }
+        )
+
+        embeddings = two_tower.item_embeddings
+        save_embeddings(embeddings, output_dir / "item_embeddings.npy")
+        index_benchmarks = _benchmark_indexes(embeddings, two_tower, entering)
+    else:
+        logger.warning(
+            "baselines.two_tower_skipped",
+            reason="no feature rows; run `mercury features build` first",
+            expected=str(feature_dir / "features_train.parquet"),
+        )
+
     payload: dict[str, Any] = {
         "generated_at": datetime.now(UTC).isoformat(),
         "preset": preset,
@@ -137,6 +230,7 @@ def run_baselines(
             "processor": platform.processor(),
         },
         "results": rows,
+        "index_benchmarks": index_benchmarks,
         "elapsed_seconds": round(time.perf_counter() - started, 2),
     }
 
