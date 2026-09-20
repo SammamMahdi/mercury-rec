@@ -1,0 +1,20 @@
+# Prometheus scrape configuration for the local stack.
+global:
+  # 15s rather than the 1m default: the demo is interactive, and a minute
+  # between samples makes a dashboard look broken while someone watches it.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+scrape_configs:
+  - job_name: mercury-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          service: recommendation-api
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.7
+# ---------------------------------------------------------------------------
+# MercuryRec API image.
+#
+# Multi-stage so the runtime layer carries no build toolchain. The dependency
+# install is a separate layer from the source copy, so editing a source file
+# does not re-resolve or re-download several hundred megabytes of wheels.
+#
+# CPU-only torch. The GPU is used for training on the development machine, but
+# serving needs no CUDA: inference here is a dot product against cached
+# embeddings plus a LightGBM predict. Pulling the cu128 wheels would add
+# roughly 2.5 GB to the image to accelerate nothing.
+# ---------------------------------------------------------------------------
+
+FROM python:3.12-slim-bookworm AS builder
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
+
+# LightGBM needs libgomp at build and run time; it is not in the slim image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Dependency layer. Copying only the manifests means this layer is reused on
+# every source-only change.
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_INDEX_PYTORCH_CU128=https://download.pytorch.org/whl/cpu \
+    uv sync --frozen --no-install-project --no-dev
+
+COPY src/ ./src/
+COPY configs/ ./configs/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_INDEX_PYTORCH_CU128=https://download.pytorch.org/whl/cpu \
+    uv sync --frozen --no-dev
+
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    MERCURY_ENVIRONMENT=docker
+
+# libgomp is a runtime dependency of LightGBM; curl is used by the healthcheck.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 mercury
+
+WORKDIR /app
+
+COPY --from=builder --chown=mercury:mercury /app/.venv /app/.venv
+COPY --chown=mercury:mercury src/ ./src/
+COPY --chown=mercury:mercury configs/ ./configs/
+COPY --chown=mercury:mercury pyproject.toml README.md ./
+
+# Mount points for data and artifacts. They are volumes at run time: the
+# dataset is CC BY-NC-SA licensed and must never be baked into an image that
+# could be pushed to a registry.
+RUN mkdir -p /app/data /app/artifacts && chown -R mercury:mercury /app/data /app/artifacts
+
+# Non-root. A container that does not need root should not have it.
+USER mercury
+
+EXPOSE 8000
+
+# Hits /health, which deliberately does not depend on Redis or on model
+# artifacts - restarting the container cannot fix either, and a healthcheck
+# that fails on them turns a degraded service into a restart loop.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=40s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "mercury_rec.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

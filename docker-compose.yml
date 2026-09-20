@@ -1,0 +1,187 @@
+# ---------------------------------------------------------------------------
+# MercuryRec local stack.
+#
+#   docker compose up -d postgres redis      # just the data services
+#   docker compose up --build                # api + data services
+#   docker compose --profile observability up -d   # + prometheus + grafana
+#   docker compose --profile tracking up -d        # + mlflow
+#   docker compose --profile web up -d             # + frontend
+#
+# Optional services sit behind profiles rather than in the default set: the
+# development machine has 16 GB of RAM shared with training, and starting
+# Grafana, Prometheus and MLflow for a backend change wastes a meaningful
+# fraction of it.
+#
+# Every service declares a healthcheck and every dependant waits on it.
+# Without that, the API starts before Postgres is accepting connections,
+# crash-loops, and the logs blame the API for a race in the compose file.
+# ---------------------------------------------------------------------------
+
+name: mercury-rec
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mercury-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mercury}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mercury}
+      POSTGRES_DB: ${POSTGRES_DB:-mercury_rec}
+      # Checksums catch silent corruption at read time rather than months
+      # later; the cost is a few percent of write throughput.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      # Tuned for a 16 GB development machine shared with training, not for a
+      # dedicated server. Justified in docs/serving.md.
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "random_page_cost=1.1"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mercury} -d ${POSTGRES_DB:-mercury_rec}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: mercury-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "512mb"
+      # The cache is fully reconstructible from Postgres and the models, so
+      # evicting under pressure is correct and persistence buys nothing.
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--appendonly"
+      - "no"
+      - "--save"
+      - ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: mercury-api
+    environment:
+      MERCURY_ENVIRONMENT: docker
+      MERCURY_POSTGRES_DSN: postgresql+psycopg://${POSTGRES_USER:-mercury}:${POSTGRES_PASSWORD:-mercury}@postgres:5432/${POSTGRES_DB:-mercury_rec}
+      MERCURY_REDIS_DSN: redis://redis:6379/0
+      MERCURY_API_HOST: 0.0.0.0
+      MERCURY_API_PORT: 8000
+      MERCURY_CORS_ORIGINS: '["http://localhost:3000"]'
+      MERCURY_ALLOW_AS_OF_OVERRIDE: "true"
+      MERCURY_NUM_THREADS: "4"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Read-only: the container serves artifacts, it never produces them.
+      # The dataset is CC BY-NC-SA and is mounted rather than baked in, so no
+      # image can carry it to a registry.
+      - ./data:/app/data:ro
+      - ./artifacts:/app/artifacts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.19.0
+    container_name: mercury-mlflow
+    profiles: ["tracking"]
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - ./artifacts/mlflow:/mlflow
+    # A database-backed store, because the model registry does not work
+    # against a bare file:// backend.
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: mercury-prometheus
+    profiles: ["observability"]
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: mercury-grafana
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Anonymous viewing: this is a local demo stack, and a login wall in
+      # front of a dashboard nobody can change adds nothing.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: mercury-web
+    profiles: ["web"]
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:${API_PORT:-8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,13 @@
+# Provisioned so the stack comes up with a working datasource rather than
+# requiring someone to click through the UI first.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
