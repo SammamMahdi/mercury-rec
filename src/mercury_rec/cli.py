@@ -44,9 +44,11 @@ env_app = typer.Typer(name="env", help="Environment diagnostics.", no_args_is_he
 data_app = typer.Typer(
     name="data", help="Dataset acquisition and preparation.", no_args_is_help=True
 )
+features_app = typer.Typer(name="features", help="Feature engineering.", no_args_is_help=True)
 
 app.add_typer(env_app)
 app.add_typer(data_app)
+app.add_typer(features_app)
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -191,6 +193,28 @@ def data_build(
         f"  split         train {split_stats['train_events']:,} / "
         f"val {split_stats['validation_events']:,} / test {split_stats['test_events']:,}"
     )
+
+
+# ---------------------------------------------------------------------------
+# features
+# ---------------------------------------------------------------------------
+
+
+@features_app.command("build")
+def features_build(
+    preset: Annotated[
+        str, typer.Option("--preset", "-p", help="Dataset preset: 'demo' or 'full'.")
+    ] = "full",
+) -> None:
+    """Compute leakage-free as-of features for every split."""
+    from mercury_rec.pipelines.build_features import build_features
+
+    result = build_features(preset=preset)
+    console.print(f"[green]Features built[/green] in {result.elapsed_seconds:.1f}s")
+    console.print(f"  output   {result.output_dir}")
+    for split, rows in result.rows_per_split.items():
+        console.print(f"  {split:<12} {rows:>9,} rows")
+    console.print(f"  features {len(result.metadata['feature_columns'])} columns")
 
 
 if __name__ == "__main__":
