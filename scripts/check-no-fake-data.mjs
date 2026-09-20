@@ -45,13 +45,79 @@ const SKIP_FILES = [/schema\.d\.ts$/];
 const ALLOW_MARKER = /no-fake-data-ok:\s*\S+/;
 
 /**
- * Lines that are entirely a comment.
+ * Blank out comments, preserving line numbers.
  *
- * Skipped deliberately. This gate is about what reaches the screen, and a
- * comment explaining why a fabricated figure would be wrong is part of the
- * defence rather than a breach of it. A number in a comment renders nowhere.
+ * Comments are exempt deliberately: this gate is about what reaches the
+ * screen, and a comment explaining why a fabricated figure would be wrong is
+ * part of the defence rather than a breach of it.
+ *
+ * Done as a state machine rather than by matching lines that *start* with a
+ * comment marker. A continuation line inside a `/* ... *\/` block need not
+ * begin with an asterisk, and treating those as code produced exactly one
+ * false positive: a comment warning against rendering a hard-coded latency.
+ *
+ * String literals are tracked so a `//` inside a URL does not swallow the
+ * rest of the line. Template-literal interpolation is not parsed, which is
+ * acceptable — the failure mode is scanning slightly too much, not too
+ * little.
  */
-const COMMENT_ONLY = /^\s*(\/\/|\/\*|\*)/;
+function stripComments(source) {
+  const output = [];
+  let inBlock = false;
+  let quote = null;
+
+  for (const line of source.split(/\r?\n/)) {
+    let cleaned = "";
+    let index = 0;
+
+    while (index < line.length) {
+      const pair = line.slice(index, index + 2);
+
+      if (inBlock) {
+        if (pair === "*/") {
+          inBlock = false;
+          index += 2;
+        } else {
+          index += 1;
+        }
+        cleaned += " ";
+        continue;
+      }
+
+      if (quote) {
+        cleaned += line[index];
+        if (line[index] === "\\") {
+          cleaned += line[index + 1] ?? "";
+          index += 2;
+          continue;
+        }
+        if (line[index] === quote) quote = null;
+        index += 1;
+        continue;
+      }
+
+      if (pair === "//") {
+        cleaned += " ".repeat(line.length - index);
+        break;
+      }
+      if (pair === "/*") {
+        inBlock = true;
+        index += 2;
+        cleaned += "  ";
+        continue;
+      }
+      if (line[index] === '"' || line[index] === "'" || line[index] === "`") {
+        quote = line[index];
+      }
+      cleaned += line[index];
+      index += 1;
+    }
+
+    output.push(cleaned);
+  }
+
+  return output;
+}
 
 const RULES = [
   {
@@ -127,19 +193,23 @@ function* walk(directory) {
 
 function scan(path) {
   const findings = [];
-  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  const source = readFileSync(path, "utf8");
+  const rawLines = source.split(/\r?\n/);
+  // Rules run against the comment-stripped text; the report quotes the
+  // original, so a finding is still recognisable in the editor.
+  const codeLines = stripComments(source);
 
-  lines.forEach((line, index) => {
-    if (ALLOW_MARKER.test(line) || COMMENT_ONLY.test(line)) return;
+  codeLines.forEach((code, index) => {
+    if (ALLOW_MARKER.test(rawLines[index])) return;
 
     for (const rule of RULES) {
-      if (!rule.pattern.test(line)) continue;
+      if (!rule.pattern.test(code)) continue;
       findings.push({
         file: relative(REPO_ROOT, path).split(sep).join("/"),
         line: index + 1,
         rule: rule.id,
         message: rule.message,
-        source: line.trim().slice(0, 120),
+        source: rawLines[index].trim().slice(0, 120),
       });
     }
   });

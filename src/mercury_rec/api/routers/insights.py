@@ -146,15 +146,46 @@ def metrics_summary(cache: CacheDep) -> dict[str, Any]:
         }
 
     def _percentile(stage: str, quantile: float) -> float | None:
-        """Interpolate a percentile from cumulative histogram buckets."""
+        """Estimate a percentile from cumulative histogram buckets.
+
+        Linearly interpolates within the bucket the quantile falls into,
+        which is what Prometheus's own ``histogram_quantile`` does. Returning
+        the bucket's upper bound instead is simpler and consistently
+        overstates: with boundaries at 50ms and 100ms, a set of 60ms requests
+        would be reported as a 100ms median. On a coarse bucket ladder that is
+        a near-doubling, presented as a measurement.
+
+        It remains an estimate. The histogram keeps counts, not samples, so
+        the true value is unrecoverable - the response says so.
+        """
         stage_buckets = sorted(buckets.get(stage, []))
         total = counts.get(stage, 0.0)
         if total == 0 or not stage_buckets:
             return None
+
         target = total * quantile
+        previous_upper = 0.0
+        previous_cumulative = 0.0
+
         for upper, cumulative in stage_buckets:
-            if cumulative >= target:
-                return round(upper * 1000.0, 3)  # seconds -> ms
+            if cumulative < target:
+                previous_upper, previous_cumulative = upper, cumulative
+                continue
+
+            if upper == float("inf"):
+                # Everything above the last finite boundary. There is no upper
+                # edge to interpolate towards, so report that boundary and let
+                # it read as "at least this".
+                return round(previous_upper * 1000.0, 3)
+
+            in_bucket = cumulative - previous_cumulative
+            if in_bucket <= 0:
+                return round(upper * 1000.0, 3)
+
+            fraction = (target - previous_cumulative) / in_bucket
+            estimate = previous_upper + fraction * (upper - previous_upper)
+            return round(estimate * 1000.0, 3)  # seconds -> ms
+
         return None
 
     stages = {
@@ -173,8 +204,11 @@ def metrics_summary(cache: CacheDep) -> dict[str, Any]:
     return {
         "has_data": True,
         "note": (
-            "Percentiles are upper bucket bounds from this process's own "
-            "histogram, so they are conservative rather than exact."
+            "Percentiles are estimated from this process's own histogram by "
+            "interpolating within the bucket each quantile falls into. A "
+            "histogram stores counts rather than samples, so these are "
+            "approximations, and they describe only the requests this process "
+            "has served since it started."
         ),
         "stages": stages,
         "cache": cache.stats.as_dict(),

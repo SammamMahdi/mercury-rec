@@ -126,6 +126,12 @@ export default function MonitoringPage() {
   const total = stages.total;
   const cache = metrics.data?.cache;
 
+  /* With no lookups at all the hit rate is undefined, not zero. Rendering
+     "0.0%" would state a measurement nobody took — the same mistake as a
+     "p95: 0.0ms" on an idle process, which this page is otherwise careful
+     about. */
+  const cacheLookups = cache ? cache.hits + cache.stale_hits + cache.misses : 0;
+
   const driftFeatures = (drift.data?.features ?? []).filter(
     (entry) => !hideStructural || !STRUCTURAL.has(entry.feature),
   );
@@ -306,11 +312,12 @@ export default function MonitoringPage() {
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <MetricTile
               label="Hit rate"
-              value={cache.hit_rate}
+              value={cacheLookups > 0 ? cache.hit_rate : null}
               percent
               decimals={1}
               icon={Database}
               hint={`${formatNumber(cache.hits + cache.stale_hits)} hits, ${formatNumber(cache.misses)} misses`}
+              emptyReason="no cache lookups yet"
             />
             <MetricTile
               label="Stale hits"

@@ -61,7 +61,21 @@ class Settings(BaseSettings):
     Benchmarks record the value actually used.
     """
 
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+    )
+    """Origins permitted to call this API from a browser.
+
+    Both spellings of the loopback address, because a browser treats
+    ``localhost`` and ``127.0.0.1`` as different origins and both are ordinary
+    ways to open a local dev server. Listing only one produces a frontend that
+    loads, renders its whole shell, and then shows "API offline" on every
+    panel with the reason visible only in the browser console.
+    """
+
     max_request_bytes: int = 1_048_576
     load_artifacts_on_startup: bool = True
     """Load the model bundle during application startup.

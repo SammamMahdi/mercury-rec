@@ -30,8 +30,8 @@
  */
 
 import { OrbitControls } from "@react-three/drei";
-import { Canvas, type ThreeEvent } from "@react-three/fiber";
-import { useEffect, useMemo } from "react";
+import { Canvas, type ThreeEvent, useThree } from "@react-three/fiber";
+import { useMemo } from "react";
 import * as THREE from "three";
 
 import { VERTICALS } from "@/lib/constants";
@@ -110,6 +110,65 @@ function verticalPalette(): Rgb[] {
 
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+
+const VERTEX_SHADER = /* glsl */ `
+  attribute vec3 aColour;
+  attribute float aTier;
+  varying vec3 vColour;
+  varying float vTier;
+
+  /**
+   * Device pixels per world unit at unit depth: (H / 2) / tan(fov / 2), with H
+   * the drawing buffer height. A uniform because it depends on the canvas size
+   * and the device pixel ratio, neither of which a shader can see.
+   */
+  uniform float uProjScale;
+
+  void main() {
+    vColour = aColour;
+    vTier = aTier;
+
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+    // Radius in WORLD units, not pixels. The line below turns it into pixels,
+    // so a point shrinks with distance and the cloud reads as having depth.
+    // The scene is normalised to a unit sphere, so these are small by
+    // construction - treating them as pixels makes every point fill the
+    // viewport and the galaxy renders as one white disc.
+    //
+    // Sized by tier as well as coloured by vertical, so a selection survives
+    // colour-vision deficiency and greyscale screenshots.
+    float radius = aTier < 0.5 ? 0.0055
+                 : aTier < 1.5 ? 0.0105
+                 : aTier < 2.5 ? 0.0180
+                 : aTier < 3.5 ? 0.0260
+                 : 0.0400;
+
+    gl_PointSize = radius * uProjScale / -mvPosition.z;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const FRAGMENT_SHADER = /* glsl */ `
+  varying vec3 vColour;
+  varying float vTier;
+
+  void main() {
+    // Round, soft-edged sprites. The default square quad makes a point cloud
+    // read as compression noise.
+    float distance = length(gl_PointCoord - vec2(0.5));
+    if (distance > 0.5) discard;
+
+    float falloff = smoothstep(0.5, 0.05, distance);
+    float alpha = vTier < 0.5 ? 0.09 : vTier < 1.5 ? 0.42 : 0.95;
+
+    gl_FragColor = vec4(vColour, alpha * falloff);
+  }
+`;
+
+/* -------------------------------------------------------------------------- */
+
 function PointCloud({
   points,
   candidates,
@@ -176,62 +235,28 @@ function PointCloud({
     return array;
   }, [candidates, ranked, finals, view, points.itemId, count]);
 
-  const material = useMemo(
-    () =>
-      new THREE.ShaderMaterial({
-        transparent: true,
-        // Additive blending without depth writes: sorting thousands of
-        // translucent sprites back-to-front would cost more than the scene is
-        // worth, and glow reads correctly without the sort.
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        vertexShader: /* glsl */ `
-          attribute vec3 aColour;
-          attribute float aTier;
-          varying vec3 vColour;
-          varying float vTier;
+  /* Device pixels per world unit at unit depth. Derived rather than mutated
+     into the material: `gl_PointSize` is in device pixels, so a world radius
+     needs the drawing buffer height and the field of view to become one, and
+     both change when the window is resized or moved to a display with a
+     different pixel ratio. */
+  const size = useThree((state) => state.size);
+  const dpr = useThree((state) => state.viewport.dpr);
+  const fov = useThree((state) => (state.camera as THREE.PerspectiveCamera).fov);
 
-          void main() {
-            vColour = aColour;
-            vTier = aTier;
-
-            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-
-            // Size by tier, so the selection survives colour-vision
-            // deficiency and greyscale screenshots instead of relying on hue.
-            float base = aTier < 0.5 ? 2.0
-                       : aTier < 1.5 ? 3.5
-                       : aTier < 2.5 ? 6.0
-                       : aTier < 3.5 ? 9.0
-                       : 14.0;
-
-            gl_PointSize = base * (300.0 / -mvPosition.z);
-            gl_Position = projectionMatrix * mvPosition;
-          }
-        `,
-        fragmentShader: /* glsl */ `
-          varying vec3 vColour;
-          varying float vTier;
-
-          void main() {
-            // Round, soft-edged sprites. The default square quad makes a
-            // point cloud read as compression noise.
-            float distance = length(gl_PointCoord - vec2(0.5));
-            if (distance > 0.5) discard;
-
-            float falloff = smoothstep(0.5, 0.05, distance);
-            float alpha = vTier < 0.5 ? 0.09 : vTier < 1.5 ? 0.45 : 0.95;
-
-            gl_FragColor = vec4(vColour, alpha * falloff);
-          }
-        `,
-      }),
-    [],
+  const projectionScale = useMemo(
+    () => (size.height * dpr) / 2 / Math.tan((fov * Math.PI) / 360),
+    [size.height, dpr, fov],
   );
 
-  // Dispose explicitly: a ShaderMaterial holds a compiled GPU program that
-  // React unmounting the component does not release.
-  useEffect(() => () => material.dispose(), [material]);
+  /* A stable uniforms object, deliberately built once and never rebuilt: a new
+     object each render would reset the uniform set on every frame. The `1` is
+     a placeholder that never reaches a draw call, because React Three Fiber
+     applies the pierced `uniforms-uProjScale-value` prop below on the same
+     commit. Driving it that way is how a uniform is meant to be updated
+     declaratively, and it keeps this component from reaching into an object
+     that a hook returned. */
+  const uniforms = useMemo(() => ({ uProjScale: { value: 1 } }), []);
 
   const handleMove = (event: ThreeEvent<PointerEvent>) => {
     event.stopPropagation();
@@ -245,7 +270,6 @@ function PointCloud({
 
   return (
     <points
-      material={material}
       onPointerMove={handleMove}
       onPointerOut={() => onHover(null)}
       onClick={handleClick}
@@ -255,6 +279,18 @@ function PointCloud({
         <bufferAttribute attach="attributes-aColour" args={[colourAttribute, 3]} />
         <bufferAttribute attach="attributes-aTier" args={[tiers, 1]} />
       </bufferGeometry>
+      <shaderMaterial
+        transparent
+        // Additive blending without depth writes: sorting thousands of
+        // translucent sprites back-to-front would cost more than the scene is
+        // worth, and glow reads correctly without the sort.
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+        uniforms={uniforms}
+        uniforms-uProjScale-value={projectionScale}
+        vertexShader={VERTEX_SHADER}
+        fragmentShader={FRAGMENT_SHADER}
+      />
     </points>
   );
 }

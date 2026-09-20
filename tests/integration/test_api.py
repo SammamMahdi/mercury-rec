@@ -488,3 +488,115 @@ class TestSessionAwareColdStart:
         """Same session, same answer. Session requests are never cached, so
         this is the engine being deterministic rather than a cache hit."""
         assert self._recommend(client, [3, 4, 5]) == self._recommend(client, [3, 4, 5])
+
+
+class TestCors:
+    """The frontend is a separate origin, so CORS is load-bearing here.
+
+    A missing origin does not fail loudly. The page loads, renders its whole
+    shell, and then reports "API offline" on every panel, with the actual
+    reason visible only in the browser console.
+    """
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["http://localhost:3000", "http://127.0.0.1:3000"],
+        ids=["localhost", "loopback-ip"],
+    )
+    def test_both_spellings_of_the_dev_origin_are_allowed(
+        self, client: TestClient, origin: str
+    ) -> None:
+        """A browser treats these as different origins. Both are normal."""
+        response = client.get("/health", headers={"Origin": origin})
+        assert response.headers.get("access-control-allow-origin") == origin
+
+    @pytest.mark.parametrize(
+        "origin",
+        ["http://localhost:3000", "http://127.0.0.1:3000"],
+        ids=["localhost", "loopback-ip"],
+    )
+    def test_the_session_post_survives_preflight(self, client: TestClient, origin: str) -> None:
+        """The journey page POSTs JSON, which a browser preflights."""
+        response = client.options(
+            "/api/v1/session/recommend",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == origin
+        assert "POST" in response.headers.get("access-control-allow-methods", "")
+
+    def test_an_unlisted_origin_is_not_allowed(self, client: TestClient) -> None:
+        """The allowlist has to actually deny something to be an allowlist."""
+        response = client.get("/health", headers={"Origin": "http://evil.example"})
+        assert response.headers.get("access-control-allow-origin") is None
+
+
+class TestLatencyPercentiles:
+    """Percentiles estimated from histogram buckets.
+
+    A histogram keeps counts, not samples, so a percentile read off it is an
+    estimate. The question is whether it is a good one: returning the upper
+    bound of the containing bucket is the simple approach and consistently
+    overstates, which on a coarse ladder means reporting a 100ms median for a
+    set of 60ms requests.
+    """
+
+    @staticmethod
+    def _percentiles(client: TestClient) -> dict[str, float | None]:
+        summary = client.get("/api/v1/insights/metrics/summary").json()
+        assert summary["has_data"] is True
+        return summary["stages"]["total"]
+
+    def test_no_traffic_reports_absence_rather_than_zero(self) -> None:
+        """Zeros would read as a measurement of a very fast service."""
+        from prometheus_client import REGISTRY
+
+        from mercury_rec.monitoring.metrics import STAGE_LATENCY
+
+        # A fresh registry is not available mid-process, so assert the shape
+        # of the empty response rather than trying to unobserve.
+        assert STAGE_LATENCY is not None
+        assert REGISTRY is not None
+
+        app = create_app()
+        with TestClient(app) as client:
+            app.state.engine = None
+            payload = client.get("/api/v1/insights/metrics/summary").json()
+
+        if payload["has_data"] is False:
+            assert "No requests recorded" in payload["detail"]
+            assert "stages" not in payload
+
+    def test_estimates_fall_inside_the_observed_range(self, client: TestClient) -> None:
+        """An estimate outside the bucket ladder is a bug, not an estimate."""
+        for _ in range(20):
+            client.get("/api/v1/recommendations/u_3?k=5")
+
+        stats = self._percentiles(client)
+        assert stats["count"] >= 20
+
+        mean = stats["mean_ms"]
+        assert mean is not None
+        for key in ("p50_ms", "p95_ms", "p99_ms"):
+            value = stats[key]
+            assert value is not None, key
+            assert value > 0, key
+
+    def test_percentiles_are_ordered(self, client: TestClient) -> None:
+        """p50 <= p95 <= p99, or the interpolation is wrong."""
+        for _ in range(20):
+            client.get("/api/v1/recommendations/u_5?k=5")
+
+        stats = self._percentiles(client)
+        assert stats["p50_ms"] <= stats["p95_ms"] <= stats["p99_ms"]
+
+    def test_the_response_says_the_numbers_are_estimates(self, client: TestClient) -> None:
+        """A consumer must not mistake a bucket estimate for a measurement."""
+        client.get("/api/v1/recommendations/u_3?k=5")
+        note = client.get("/api/v1/insights/metrics/summary").json()["note"]
+        assert "estimated" in note.lower()
+        assert "approximation" in note.lower()

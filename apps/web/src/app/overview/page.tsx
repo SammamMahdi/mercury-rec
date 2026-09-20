@@ -220,10 +220,19 @@ export default function OverviewPage() {
             />
             <MetricTile
               label="Cache hit rate"
-              value={metrics.data.cache.hit_rate}
+              // Undefined rather than zero when nothing has been looked up.
+              value={
+                metrics.data.cache.hits +
+                  metrics.data.cache.stale_hits +
+                  metrics.data.cache.misses >
+                0
+                  ? metrics.data.cache.hit_rate
+                  : null
+              }
               percent
               decimals={1}
               icon={Gauge}
+              emptyReason="no cache lookups yet"
               hint={`${formatNumber(metrics.data.cache.hits + metrics.data.cache.stale_hits)} hits / ${formatNumber(
                 metrics.data.cache.misses,
               )} misses`}

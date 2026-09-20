@@ -92,7 +92,7 @@ services:
       MERCURY_REDIS_DSN: redis://redis:6379/0
       MERCURY_API_HOST: 0.0.0.0
       MERCURY_API_PORT: 8000
-      MERCURY_CORS_ORIGINS: '["http://localhost:3000"]'
+      MERCURY_CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000"]'
       MERCURY_ALLOW_AS_OF_OVERRIDE: "true"
       MERCURY_NUM_THREADS: "4"
     ports:
