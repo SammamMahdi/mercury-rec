@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "gen:api": "openapi-typescript openapi.json -o src/lib/api/schema.d.ts",
+    "check:no-fake-data": "node ../../scripts/check-no-fake-data.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",

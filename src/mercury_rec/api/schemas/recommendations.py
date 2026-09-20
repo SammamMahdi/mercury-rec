@@ -27,7 +27,27 @@ from pydantic import BaseModel, ConfigDict, Field
 from mercury_rec.core.enums import DataSource
 
 
-class StageLatency(BaseModel):
+class ResponseModel(BaseModel):
+    """Base for every model this API returns.
+
+    ``json_schema_serialization_defaults_required`` makes a field that has a
+    default REQUIRED in the published schema. For a response that is simply
+    the truth: FastAPI serialises every field, so a client always receives
+    them. A schema that calls them optional forces every consumer to handle an
+    ``undefined`` that cannot arrive, and the frontend's generated types then
+    disagree with the hand-written ones for no real reason.
+
+    Request models deliberately do NOT inherit this. There a default means
+    what it says - the caller may omit the field.
+
+    Frozen because a response is a snapshot. Mutating one after it is built
+    means something was decided too late.
+    """
+
+    model_config = ConfigDict(frozen=True, json_schema_serialization_defaults_required=True)
+
+
+class StageLatency(ResponseModel):
     """Milliseconds spent in each stage of the request.
 
     Returned on every response so a slow request is diagnosable from the
@@ -35,8 +55,6 @@ class StageLatency(BaseModel):
     what lets the frontend's Pipeline Inspector show real numbers rather than
     a drawing.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     cache_lookup_ms: float = 0.0
     feature_lookup_ms: float = 0.0
@@ -46,10 +64,8 @@ class StageLatency(BaseModel):
     total_ms: float = 0.0
 
 
-class Recommendation(BaseModel):
+class Recommendation(ResponseModel):
     """One recommended item."""
-
-    model_config = ConfigDict(frozen=True)
 
     item_id: int
     rank: Annotated[int, Field(ge=1, description="1-based position in the list")]
@@ -84,7 +100,7 @@ class Recommendation(BaseModel):
     price: float | None = None
 
 
-class RecommendationExplanation(BaseModel):
+class RecommendationExplanation(ResponseModel):
     """Why one item was ranked where it was.
 
     Values are exact TreeSHAP contributions from the ranking model, signed:
@@ -92,8 +108,6 @@ class RecommendationExplanation(BaseModel):
     real attributions for this specific score, not a narrative written after
     the fact.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     item_id: int
     contributions: dict[str, float]
@@ -112,10 +126,8 @@ class RequestContext(BaseModel):
     device: Annotated[int | None, Field(default=None, ge=0, le=3)] = None
 
 
-class RecommendationResponse(BaseModel):
+class RecommendationResponse(ResponseModel):
     """The response returned by the recommendation endpoints."""
-
-    model_config = ConfigDict(frozen=True)
 
     user_id: str
     request_id: str
@@ -181,28 +193,30 @@ class EventIngest(BaseModel):
     price: float | None = Field(default=None, ge=0)
 
 
-class EventIngestResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class EventIngestResponse(ResponseModel):
     accepted: int
     rejected: int = 0
     rejection_reasons: dict[str, int] = Field(default_factory=dict)
     invalidated_cache_keys: int = 0
 
 
-class SimilarItemsResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class SimilarItemsResponse(ResponseModel):
     item_id: int
     model_version: str
     similar: list[Recommendation]
     latency_ms: float
 
 
-class ModelStatus(BaseModel):
+class ModelStatus(ResponseModel):
     """One loaded model's identity and provenance."""
 
-    model_config = ConfigDict(frozen=True, protected_namespaces=())
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_serialization_defaults_required=True,
+        # 'model_version' would otherwise collide with Pydantic's own
+        # protected 'model_' prefix.
+        protected_namespaces=(),
+    )
 
     name: str
     version: str
@@ -212,45 +226,37 @@ class ModelStatus(BaseModel):
     params: dict[str, float | int | str | bool | None] = Field(default_factory=dict)
 
 
-class ModelsStatusResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ModelsStatusResponse(ResponseModel):
     retrieval: list[ModelStatus]
     ranking: ModelStatus | None = None
     feature_schema_version: int
     dataset_hash: str | None = None
 
 
-class HealthResponse(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class HealthResponse(ResponseModel):
     status: str
     version: str
     uptime_seconds: float
 
 
-class ReadinessCheck(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+class ReadinessCheck(ResponseModel):
     name: str
     ready: bool
     detail: str | None = None
 
 
-class ReadinessResponse(BaseModel):
+class ReadinessResponse(ResponseModel):
     """Readiness, with per-dependency detail.
 
     A bare boolean is not actionable during an incident: what matters is
     *which* dependency is down, so each is reported separately.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     ready: bool
     checks: list[ReadinessCheck]
 
 
-class ErrorResponse(BaseModel):
+class ErrorResponse(ResponseModel):
     """A structured error.
 
     Deliberately carries no internal detail - no stack trace, no SQL, no file
@@ -258,14 +264,12 @@ class ErrorResponse(BaseModel):
     which is where that detail belongs.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     error: str
     detail: str
     request_id: str | None = None
 
 
-class PipelineTraceResponse(BaseModel):
+class PipelineTraceResponse(ResponseModel):
     """Which items each stage of the pipeline held, for one request.
 
     A diagnostic, served from its own endpoint rather than bolted onto every
@@ -277,8 +281,6 @@ class PipelineTraceResponse(BaseModel):
     reconstructing one from the final list would describe a funnel that never
     ran.
     """
-
-    model_config = ConfigDict(frozen=True)
 
     user_id: str
     request_id: str
@@ -327,6 +329,7 @@ __all__ = [
     "RecommendationExplanation",
     "RecommendationResponse",
     "RequestContext",
+    "ResponseModel",
     "SessionRecommendRequest",
     "SimilarItemsResponse",
     "StageLatency",
