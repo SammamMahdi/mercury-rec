@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # CI has no GPU. torch must come from the CPU index here, NOT the cu128
+  # index pinned in pyproject.toml for the development machine - a cu128
+  # wheel is ~2.5 GB and would be downloaded only to sit unused.
+  UV_INDEX_PYTORCH_CU128: https://download.pytorch.org/whl/cpu
+  PYTHONUTF8: "1"
+
+jobs:
+  quality:
+    name: Lint, type-check, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mercury
+          POSTGRES_PASSWORD: mercury
+          POSTGRES_DB: mercury_rec
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mercury"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra viz --frozen
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Type check
+        run: uv run mypy src/
+
+      - name: Unit, ML and data tests
+        run: uv run pytest -m "not integration and not gpu" --cov --cov-report=term-missing
+
+      - name: Integration tests
+        env:
+          MERCURY_POSTGRES_DSN: postgresql+psycopg://mercury:mercury@localhost:5432/mercury_rec
+          MERCURY_REDIS_DSN: redis://localhost:6379/0
+        run: uv run pytest -m integration
+
+  docker:
+    name: Docker build and stack health
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The development machine has no Docker installed, so the compose stack is
+    # verified here instead. This makes the README's Docker instructions a
+    # tested claim rather than an assumed one - see docs/design-decisions.md.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -f infra/docker/Dockerfile.api -t mercury-rec-api:ci .
+
+      - name: Start the stack
+        run: docker compose up -d --wait postgres redis api
+
+      - name: Probe health endpoint
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              echo "api healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "api did not become healthy"; docker compose logs api; exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

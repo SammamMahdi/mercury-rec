@@ -1,0 +1,110 @@
+# ---------------------------------------------------------------------------
+# Data — NEVER COMMIT.
+# RetailRocket is licensed CC BY-NC-SA 4.0 (NonCommercial + ShareAlike), which
+# encumbers derived artifacts as well as the raw download. The repository ships
+# a reproducible download + build script instead. See docs/data-card.md.
+# ---------------------------------------------------------------------------
+/data/
+!/data/.gitkeep
+!/data/README.md
+
+# Model artifacts, indexes, embeddings
+/artifacts/
+!/artifacts/.gitkeep
+/mlruns/
+mlflow.db
+*.pt
+*.pth
+*.onnx
+*.faiss
+*.npy
+*.npz
+*.pkl
+*.joblib
+*.txt.model
+*.lgb
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/keys.py
+.kaggle/
+kaggle.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.venv/
+venv/
+ENV/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+.tox/
+.nox/
+profile_output/
+*.prof
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Benchmarks (raw run output; curated results ARE committed)
+/benchmarks/raw/
+locust_report_*.html
+
+# graphify
+/graphify-out/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Private build specification (not part of the deliverable)
+Instructions.md

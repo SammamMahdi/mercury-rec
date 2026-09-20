@@ -1,0 +1,25 @@
+# Normalise to LF in the repository. The project is developed on Windows but
+# runs in Linux containers and on Linux CI runners, where a CRLF shebang line
+# makes a script fail with a confusing "not found" error.
+* text=auto eol=lf
+
+# Windows-only files keep CRLF.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touch binaries.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.parquet binary
+*.npy  binary
+*.pt   binary
+*.zip  binary
+
+# Generated - collapse in diffs and exclude from language statistics.
+uv.lock         linguist-generated=true -diff
+package-lock.json linguist-generated=true -diff
+apps/web/lib/api/types.ts linguist-generated=true

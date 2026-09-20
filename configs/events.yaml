@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Implicit-feedback event weights
+#
+# Implicit feedback has no explicit rating, so every model that consumes
+# interactions needs a confidence value per event type. These weights are the
+# single place that mapping is defined; no model hard-codes them.
+#
+# REASONING
+# The weights approximate the *relative cost to the user* of performing the
+# action, which is a better proxy for preference than raw frequency. Following
+# Hu, Koren & Volinsky (2008), confidence enters the implicit-feedback models
+# as c_ui = 1 + alpha * w(event); the ratios between weights matter, the
+# absolute scale does not (it is absorbed by `alpha`).
+#
+# Each value is justified rather than tuned to look good. They are
+# deliberately round numbers: pretending to three decimal places would imply a
+# precision the underlying assumption does not have. `alpha` IS tuned, on the
+# validation split, and that tuned value is reported in docs/recommender-system.md.
+# ---------------------------------------------------------------------------
+
+weights:
+  # Shown by the system, not chosen by the user. Near-zero preference
+  # evidence, but not zero: an impression is the denominator of CTR and
+  # marks what was available to be chosen.
+  impression: 0.1
+
+  # An explicit pass over an item the user did see. Weak negative evidence.
+  # Kept slightly positive rather than negative because the implicit-feedback
+  # formulation treats all observed events as positive-confidence; genuine
+  # negatives are handled by negative sampling, not by a negative weight.
+  skip: 0.05
+
+  # First deliberate act of interest. The canonical "medium" signal.
+  click: 1.0
+
+  # A click that survived the landing page. Strictly more informative than
+  # the click that preceded it.
+  view: 1.5
+
+  # Query-driven intent. Higher than a click because the user supplied the
+  # intent rather than selecting from what was offered.
+  search: 2.0
+
+  # Real intent with no financial commitment.
+  wishlist: 2.5
+
+  # Strong intent, one step from conversion.
+  add_to_cart: 4.0
+
+  # An add-to-cart that was reversed. Weighted below add_to_cart but above
+  # click: the interest was real even though the purchase was not.
+  remove_from_cart: 1.5
+
+  # The user spent effort to express an opinion. Note the *act* of rating is
+  # what is weighted here; rating polarity is a separate feature.
+  rating: 3.0
+
+  # Conversion. The outcome the system exists to produce.
+  purchase: 8.0
+
+  # The strongest available signal: the user bought, experienced the product,
+  # and chose it again. Roughly 1.5x a first purchase — repeat purchase is
+  # more informative per event, but not so dominant that it collapses the
+  # model onto a handful of staples.
+  repeat_purchase: 12.0
+
+# Confidence scaling for implicit ALS / BPR: c_ui = 1 + alpha * w(event).
+# Tuned on the validation split; see docs/recommender-system.md for the sweep.
+alpha: 40.0
+
+# Half-life in days for time-decayed interaction weighting. Behaviour in
+# on-demand commerce goes stale quickly — a restaurant preference from six
+# months ago is much weaker evidence than one from last week.
+# Chosen to match the observed repeat-purchase inter-arrival distribution,
+# which is reported in the EDA notebook.
+recency_half_life_days: 30.0
+
+# Events below this weight are excluded from item-item CF co-occurrence, which
+# otherwise becomes dominated by impressions and loses all discrimination.
+cf_min_event_weight: 1.0
