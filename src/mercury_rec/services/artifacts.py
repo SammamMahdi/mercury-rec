@@ -27,6 +27,7 @@ from mercury_rec.models.item_cf import ItemCFRecommender
 from mercury_rec.models.mf import BPRRecommender
 from mercury_rec.models.popularity import ContextualPopularityRecommender, PopularityRecommender
 from mercury_rec.models.ranking.ranker import LambdaRanker
+from mercury_rec.models.two_tower.recommender import TwoTowerRecommender
 from mercury_rec.recommender.engine import ArtifactBundle
 
 logger = get_logger(__name__)
@@ -111,6 +112,29 @@ def load_bundle(
         matrix_factorization = BPRRecommender(n_users, n_items, epochs=30)
         matrix_factorization.fit(train)
 
+    # --- two-tower -------------------------------------------------------
+    # Loaded from persisted embeddings, not rebuilt: the towers are an offline
+    # cost, and a replica that had to reconstruct a torch graph and a CUDA
+    # context to answer a dot product would be paying for the wrong half of
+    # the architecture.
+    two_tower: TwoTowerRecommender | None = None
+    two_tower_path = artifacts / "models" / preset / "two_tower.npz"
+    if two_tower_path.is_file():
+        try:
+            two_tower = TwoTowerRecommender.load_serving_state(
+                two_tower_path,
+                items=items,
+                users=pd.read_parquet(processed_dir / "users.parquet"),
+            )
+        except (ValueError, OSError, KeyError) as exc:
+            # Retrieval degrades to the remaining sources. A mismatched or
+            # unreadable embedding file must not take the service down, but it
+            # must also never be served, because wrong-by-one embeddings
+            # produce confident nonsense rather than an error.
+            logger.warning("artifacts.two_tower_load_failed", error=str(exc)[:200])
+    else:
+        logger.info("artifacts.two_tower_absent", expected=str(two_tower_path))
+
     # --- ranker ----------------------------------------------------------
     ranker: LambdaRanker | None = None
     ranker_path = artifacts / "models" / preset / "ranker.txt"
@@ -165,7 +189,7 @@ def load_bundle(
         contextual_popularity=contextual if fit_retrieval else None,
         item_cf=item_cf,
         matrix_factorization=matrix_factorization,
-        two_tower=None,
+        two_tower=two_tower,
         ranker=ranker,
         items=items.reset_index(drop=True),
         user_index=user_index,
@@ -180,6 +204,7 @@ def load_bundle(
         n_items=n_items,
         feature_schema=FEATURE_SCHEMA_VERSION,
         has_ranker=ranker is not None,
+        has_two_tower=two_tower is not None,
     )
     return bundle
 

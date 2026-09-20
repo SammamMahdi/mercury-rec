@@ -265,6 +265,54 @@ class ErrorResponse(BaseModel):
     request_id: str | None = None
 
 
+class PipelineTraceResponse(BaseModel):
+    """Which items each stage of the pipeline held, for one request.
+
+    A diagnostic, served from its own endpoint rather than bolted onto every
+    recommendation response: it is two orders of magnitude larger than the
+    result it explains, and the serving path has no use for it.
+
+    Requesting a trace forces a full pipeline run and bypasses the cache,
+    because a cached response has no stage membership to report and
+    reconstructing one from the final list would describe a funnel that never
+    ran.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    user_id: str
+    request_id: str
+    model_version: str
+    generated_at: datetime
+
+    candidate_ids: list[int] = Field(
+        default_factory=list, description="Every item that survived retrieval and fusion."
+    )
+    candidate_sources: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description=(
+            "Item ids proposed by each source. An item appears under every "
+            "source that returned it, so the overlap between sources is visible."
+        ),
+    )
+    ranked_ids: list[int] = Field(
+        default_factory=list, description="Candidates in ranker order, best first."
+    )
+    ranked_scores: list[float] = Field(
+        default_factory=list,
+        description="Ranker output per entry in ranked_ids. An ordinal utility, not a probability.",
+    )
+    final_ids: list[int] = Field(
+        default_factory=list, description="What the business rerank actually returned."
+    )
+
+    latency: StageLatency
+    n_candidates: int = 0
+    filtered: dict[str, int] = Field(default_factory=dict)
+    is_cold_start: bool = False
+    note: str = ""
+
+
 __all__ = [
     "ErrorResponse",
     "EventIngest",
@@ -272,6 +320,7 @@ __all__ = [
     "HealthResponse",
     "ModelStatus",
     "ModelsStatusResponse",
+    "PipelineTraceResponse",
     "ReadinessCheck",
     "ReadinessResponse",
     "Recommendation",

@@ -195,6 +195,26 @@ def run_baselines(
         embeddings = two_tower.item_embeddings
         save_embeddings(embeddings, output_dir / "item_embeddings.npy")
         index_benchmarks = _benchmark_indexes(embeddings, two_tower, entering)
+
+        # --- serving cache ------------------------------------------------
+        # Evaluation embeds each user as they ENTER the held-out window,
+        # because that is the state a request in that window would see. A
+        # deployed replica sees something different: the last state observed
+        # in the training window, for every user who appeared in it. Encoding
+        # both and persisting the second is the difference between serving
+        # the two-tower to 3.5k evaluated users and serving it to all of them.
+        serving_rows = train_features.sort_values("ts").drop_duplicates("user_id", keep="last")
+        two_tower.set_user_embeddings(
+            serving_rows["user_id"].to_numpy(), two_tower.encode_users(serving_rows)
+        )
+        model_dir = (artifacts_dir or Path("artifacts")) / "models" / preset
+        two_tower.save_serving_state(model_dir / "two_tower.npz")
+        two_tower.save(model_dir / "two_tower.pt")
+        logger.info(
+            "baselines.two_tower_persisted",
+            serving_users=len(serving_rows),
+            of_users=n_users,
+        )
     else:
         logger.warning(
             "baselines.two_tower_skipped",

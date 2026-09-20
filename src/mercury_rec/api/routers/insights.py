@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from mercury_rec.api.deps import CacheDep, EngineDep
 from mercury_rec.core.logging import get_logger
@@ -86,6 +86,23 @@ def ranking_insights(request: Request) -> dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No ranking results available. Run `mercury train ranker`.",
+        )
+    return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+
+
+@router.get("/experiment", summary="Offline A/B simulation and gate verdict")
+def experiment_insights(request: Request) -> dict[str, Any]:
+    """Return the offline A/B comparison and the promotion gate result.
+
+    The payload carries is_simulated and a disclaimer describing exactly what
+    the comparison establishes, so the frontend can render it behind a warning
+    badge rather than as an online experiment result.
+    """
+    path = _evaluation_path(request, "experiment_results.json")
+    if not path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No experiment results available. Run `mercury train experiment`.",
         )
     return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
@@ -162,6 +179,86 @@ def metrics_summary(cache: CacheDep) -> dict[str, Any]:
         "stages": stages,
         "cache": cache.stats.as_dict(),
     }
+
+
+@router.get("/drift", summary="Feature drift between two windows")
+def drift_insights(request: Request) -> dict[str, Any]:
+    """Serve the committed drift report.
+
+    Read from an artifact rather than computed per request: comparing two
+    quarter-million-row windows takes seconds and allocates hundreds of
+    megabytes, which is not something an interactive dashboard should trigger
+    on every page load.
+    """
+    path = _evaluation_path(request, "drift.json")
+    monitoring_path = (
+        Path("artifacts") / "monitoring" / getattr(request.app.state, "preset", "full")
+    ) / "drift.json"
+    chosen = monitoring_path if monitoring_path.is_file() else path
+
+    if not chosen.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No drift report has been produced. Run `mercury monitor drift` "
+                "to compare the training window against the held-out one."
+            ),
+        )
+    return json.loads(chosen.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+
+
+@router.get("/sample-users", summary="Real user ids to explore with")
+def sample_users(
+    engine: EngineDep,
+    n: Annotated[int, Query(ge=1, le=50)] = 8,
+) -> dict[str, Any]:
+    """Return a spread of real user ids, with how much history each one has.
+
+    Without this the explorer asks for a user id the visitor has no way to
+    know, and the only reachable path through the product is the cold-start
+    one. The ids are drawn across the history distribution rather than from
+    its head, because a demo that only ever shows the most active user in the
+    dataset is showing the easiest case and calling it typical.
+
+    Sorted deterministically, so a reload does not reshuffle the list.
+    """
+    bundle = engine.bundle
+    if not bundle.user_history:
+        return {"users": [], "detail": "No training history is loaded."}
+
+    # Internal index -> external id, which is what the API accepts.
+    external = {internal: source for source, internal in bundle.user_index.items()}
+
+    ranked = sorted(
+        ((internal, len(items)) for internal, items in bundle.user_history.items()),
+        key=lambda pair: (-pair[1], pair[0]),
+    )
+    if not ranked:
+        return {"users": [], "detail": "No training history is loaded."}
+
+    # Evenly spaced positions in the history distribution: the busiest user,
+    # the quietest, and a ladder between them.
+    last = len(ranked) - 1
+    step = max(1, len(ranked) // n)
+    two_tower = bundle.two_tower
+
+    users: list[dict[str, Any]] = []
+    for rank in range(0, len(ranked), step):
+        if len(users) == n:
+            break
+        internal, count = ranked[rank]
+        users.append(
+            {
+                "user_id": external.get(internal, str(internal)),
+                "history_items": count,
+                "percentile": round(100.0 * (1.0 - rank / max(last, 1)), 1),
+                "has_two_tower_embedding": (
+                    two_tower is not None and two_tower.user_vector(internal) is not None
+                ),
+            }
+        )
+
+    return {"users": users, "n_users_with_history": len(ranked)}
 
 
 @router.get("/config", summary="Effective serving configuration")

@@ -56,6 +56,27 @@ from mercury_rec.retrieval.candidates import reciprocal_rank_fusion, retrieve_fr
 
 logger = get_logger(__name__)
 
+#: How much of a cold-start slate is driven by the current session rather than
+#: by the contextual popularity prior. Weighted toward the session because a
+#: visitor who has looked at three items has told us more about this visit than
+#: the aggregate has, but not entirely: three views are a thin basis, and the
+#: prior keeps the slate from collapsing onto one narrow neighbourhood.
+_SESSION_WEIGHT = 0.7
+
+
+def _unit_scale(values: np.ndarray) -> np.ndarray:
+    """Rescale to [0, 1], tolerating a constant input.
+
+    Used before blending two score vectors that have no common unit. A
+    degenerate range returns zeros rather than dividing by it, so the other
+    term simply decides the ranking.
+    """
+    low = float(values.min())
+    high = float(values.max())
+    if high <= low:
+        return np.zeros_like(values, dtype=np.float64)
+    return (values.astype(np.float64) - low) / (high - low)
+
 
 @dataclass(slots=True)
 class StageTimings:
@@ -145,6 +166,30 @@ class ArtifactBundle:
 
 
 @dataclass(slots=True)
+class StageTrace:
+    """Which items each stage of the pipeline actually held.
+
+    Opt-in, and never cached. These are several kilobytes of item ids that the
+    serving path has no use for; putting them in the cache payload would make
+    every cached response carry a diagnostic that almost no request asks for.
+
+    It exists because the funnel is otherwise invisible. Counts say 600
+    candidates became 10 recommendations; only the membership says *which*
+    600, which is what makes the galaxy and the pipeline inspector show a real
+    narrowing rather than an illustration of one.
+    """
+
+    candidate_ids: list[int]
+    candidate_sources: dict[str, list[int]]
+    """Item ids each source proposed. An item appears under every source that
+    returned it, because overlap between sources is the interesting part."""
+
+    ranked_ids: list[int]
+    ranked_scores: list[float]
+    final_ids: list[int]
+
+
+@dataclass(slots=True)
 class RecommendationResult:
     """The engine's output, before HTTP serialisation."""
 
@@ -161,6 +206,7 @@ class RecommendationResult:
     filtered: dict[str, int] = field(default_factory=dict)
     explanations: list[dict[str, float]] = field(default_factory=list)
     data_provenance: DataSource = DataSource.AUGMENTED
+    trace: StageTrace | None = None
 
 
 class RecommendationEngine:
@@ -243,7 +289,12 @@ class RecommendationEngine:
                 )
             )
 
-        if bundle.two_tower is not None:
+        # A user who never appeared in the training window has no encoded
+        # embedding. Scoring them anyway would dot a zero vector against the
+        # catalogue, giving every item the same score and handing fusion a
+        # slate of arbitrary candidates wearing a model's name. Dropping the
+        # source costs quality; serving it would cost correctness.
+        if bundle.two_tower is not None and bundle.two_tower.user_vector(internal_user) is not None:
             started = time.perf_counter()
             try:
                 scores = bundle.two_tower._score(internal_user, catalogue, model_context)
@@ -256,9 +307,6 @@ class RecommendationEngine:
                     )
                 )
             except RuntimeError:
-                # No cached user embedding for this user. The other sources
-                # still serve the request; dropping one source degrades
-                # quality rather than failing the call.
                 logger.debug("engine.two_tower_unavailable", user=internal_user)
 
         return reciprocal_rank_fusion(results, max_candidates=self.max_candidates, exclude=exclude)
@@ -315,8 +363,20 @@ class RecommendationEngine:
         k: int = 10,
         context: RequestContext | None = None,
         use_cache: bool = True,
+        trace: bool = False,
     ) -> RecommendationResult:
-        """Produce recommendations for one user."""
+        """Produce recommendations for one user.
+
+        Args:
+            user_id: External user id.
+            k: How many recommendations to return.
+            context: Request context; defaults to an empty one.
+            use_cache: Read from and write to the recommendation cache.
+            trace: Also record which items each stage held. Forces a full
+                pipeline run, because a cached response has no trace to
+                return and fabricating one from the final list would invent a
+                funnel that never happened.
+        """
         started = time.perf_counter()
         timings = StageTimings()
         request_id = str(uuid.uuid4())
@@ -324,6 +384,9 @@ class RecommendationEngine:
         bundle = self.bundle
 
         cache_key = keys.recommendations(bundle.model_version, user_id, ctx.fingerprint(), k)
+
+        if trace:
+            use_cache = False
 
         if use_cache:
             with self._timed(timings, "cache_lookup_ms"):
@@ -382,6 +445,10 @@ class RecommendationEngine:
 
         timings.total_ms = (time.perf_counter() - started) * 1000.0
 
+        # Built after the timings are closed, so a diagnostic never inflates
+        # the latency it is there to explain.
+        stage_trace = self._build_trace(candidates, scores, rerank_result) if trace else None
+
         result = RecommendationResult(
             user_id=user_id,
             request_id=request_id,
@@ -394,12 +461,32 @@ class RecommendationEngine:
             candidate_sources=candidates.source_counts,
             filtered=rerank_result.filtered_counts,
             explanations=explanations,
+            trace=stage_trace,
         )
 
         if use_cache:
             self.cache.set(cache_key, _to_cacheable(result), user_id=user_id)
 
         return result
+
+    @staticmethod
+    def _build_trace(candidates: Any, scores: np.ndarray, rerank_result: Any) -> StageTrace:
+        """Record stage membership for the pipeline and galaxy views."""
+        item_ids: np.ndarray = candidates.item_ids
+        order = np.argsort(-scores)
+
+        per_source = {
+            source: item_ids[~np.isnan(source_scores)].tolist()
+            for source, source_scores in candidates.per_source_scores.items()
+        }
+
+        return StageTrace(
+            candidate_ids=item_ids.tolist(),
+            candidate_sources=per_source,
+            ranked_ids=item_ids[order].tolist(),
+            ranked_scores=[float(value) for value in scores[order]],
+            final_ids=[item.item_id for item in rerank_result.items],
+        )
 
     def _build_scored_items(self, candidates: Any, scores: np.ndarray) -> list[ScoredItem]:
         """Attach catalogue attributes needed by the business rules."""
@@ -427,31 +514,83 @@ class RecommendationEngine:
         return scored
 
     def _cold_start(self, context: RequestContext, k: int) -> list[ScoredItem]:
-        """Contextual popularity for users with no usable history.
+        """Serve a user with no usable history.
 
-        Deliberately a real path rather than an error: a new user is the most
-        common case a live system faces, and "no recommendations" is never the
-        right answer to it.
+        Deliberately a real path rather than an error: a new or anonymous user
+        is the most common case a live system faces, and "no recommendations"
+        is never the right answer to it.
+
+        Two sub-cases, and the difference matters. With nothing at all to go
+        on, contextual popularity is the honest best guess. But an anonymous
+        visitor who has just looked at three items is not a blank slate - that
+        session IS the strongest signal available about them, and ignoring it
+        to serve the same bestseller list to everyone wastes the one thing the
+        request actually carries.
         """
         bundle = self.bundle
         model = bundle.contextual_popularity or bundle.popularity
         from mercury_rec.models.base import RecommendationContext as ModelContext
 
-        top = model.recommend(
-            0,
-            k=k,
-            context=ModelContext(
-                hour=context.hour,
-                weekday=context.weekday,
-                region_id=context.region_id,
-                vertical=context.vertical,
-            ),
+        model_context = ModelContext(
+            hour=context.hour,
+            weekday=context.weekday,
+            region_id=context.region_id,
+            vertical=context.vertical,
+            session_items=context.session_items,
         )
-        scores = model.item_scores
+
+        session_scores = self._session_affinity(context.session_items)
+        if session_scores is None:
+            top = model.recommend(0, k=k, context=model_context)
+            scores = model.item_scores
+            return [
+                ScoredItem(item_id=item_id, ml_relevance_score=float(scores[item_id]))
+                for item_id in top
+            ]
+
+        # Blend session affinity with the contextual prior. Both are rescaled
+        # to [0, 1] first: raw item-CF similarity and recency-decayed event
+        # counts are on unrelated scales, and adding them unnormalised would
+        # let whichever happens to be larger silently decide the whole slate.
+        popularity_scores = _unit_scale(np.asarray(model.item_scores, dtype=np.float64))
+        blended = (
+            _SESSION_WEIGHT * _unit_scale(session_scores)
+            + (1.0 - _SESSION_WEIGHT) * popularity_scores
+        )
+
+        # Never recommend back the items being looked at right now.
+        seen = np.fromiter(context.session_items, dtype=np.int64)
+        seen = seen[(seen >= 0) & (seen < bundle.n_items)]
+        blended[seen] = -np.inf
+
+        top_items = np.argsort(-blended)[:k]
         return [
-            ScoredItem(item_id=item_id, ml_relevance_score=float(scores[item_id]))
-            for item_id in top
+            ScoredItem(item_id=int(item_id), ml_relevance_score=float(blended[item_id]))
+            for item_id in top_items
         ]
+
+    def _session_affinity(self, session_items: tuple[int, ...]) -> np.ndarray | None:
+        """Similarity of every item to what this session has looked at.
+
+        Returns None when there is no usable signal - no session, no item-CF
+        model, or session items the model has never seen - so the caller falls
+        back to the contextual prior rather than ranking by a zero vector.
+        """
+        bundle = self.bundle
+        if not session_items or bundle.item_cf is None or not bundle.item_cf.is_fitted:
+            return None
+
+        items = np.fromiter(session_items, dtype=np.int64)
+        items = items[(items >= 0) & (items < bundle.n_items)]
+        if items.size == 0:
+            return None
+
+        affinity = np.zeros(bundle.n_items, dtype=np.float64)
+        for item_id in items:
+            for neighbour, score in bundle.item_cf.similar_items(int(item_id), k=200):
+                affinity[neighbour] += score
+
+        return affinity if np.any(affinity) else None
 
     def observe_event(
         self,
@@ -540,4 +679,5 @@ __all__ = [
     "RecommendationResult",
     "RequestContext",
     "StageTimings",
+    "StageTrace",
 ]

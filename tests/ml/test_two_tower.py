@@ -8,7 +8,10 @@ properties directly rather than inferring correctness from training.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 
@@ -20,6 +23,7 @@ from mercury_rec.models.two_tower.losses import (
     sorted_interaction_pairs,
 )
 from mercury_rec.models.two_tower.model import Tower, TowerSpec, TwoTowerModel
+from mercury_rec.models.two_tower.recommender import TwoTowerRecommender
 from mercury_rec.retrieval.index import (
     ExactIndex,
     FlatIPIndex,
@@ -298,3 +302,112 @@ class TestVectorIndexes:
         result = benchmark_index(ExactIndex(), embeddings, embeddings[:20], k=10)
         assert result.recall_at_k == 1.0
         assert result.mean_query_ms > 0
+
+
+class TestServingState:
+    """Round-tripping the embeddings a replica actually serves from.
+
+    Serving does not need the towers: both sides were encoded offline and
+    scoring is a dot product. What must survive the round trip is the exact
+    alignment between row index and id, because an off-by-one there produces
+    confident, plausible, wrong recommendations that no downstream check can
+    catch.
+    """
+
+    @staticmethod
+    def _catalogue(n_items: int, n_users: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+        item_ids = np.arange(n_items)
+        items = pd.DataFrame(
+            {
+                "item_id": item_ids,
+                "category_id": item_ids % 7,
+                "merchant_id": item_ids % 5,
+                "vertical": item_ids % 6,
+                "price": (item_ids % 11 + 3).astype(float),
+                "is_available": True,
+            }
+        )
+        user_ids = np.arange(n_users)
+        users = pd.DataFrame(
+            {
+                "user_id": user_ids,
+                "region_id": user_ids % 4,
+                "device_pref": user_ids % 3,
+            }
+        )
+        return items, users
+
+    def _fitted(self, tmp_path: Path) -> tuple[TwoTowerRecommender, pd.DataFrame, pd.DataFrame]:
+        n_items, n_users, dim = 24, 12, 8
+        items, users = self._catalogue(n_items, n_users)
+
+        model = TwoTowerRecommender(n_users, n_items, items=items, users=users)
+        rng = np.random.default_rng(19)
+        item_embeddings = rng.normal(size=(n_items, dim)).astype(np.float32)
+        item_embeddings /= np.linalg.norm(item_embeddings, axis=1, keepdims=True)
+
+        model._item_embeddings = item_embeddings
+        model._fitted = True
+        model.set_user_embeddings(
+            np.arange(n_users), rng.normal(size=(n_users, dim)).astype(np.float32)
+        )
+        return model, items, users
+
+    def test_round_trip_preserves_both_matrices(self, tmp_path: Path) -> None:
+        model, items, users = self._fitted(tmp_path)
+        path = tmp_path / "two_tower.npz"
+        model.save_serving_state(path)
+
+        loaded = TwoTowerRecommender.load_serving_state(path, items=items, users=users)
+
+        np.testing.assert_array_equal(loaded.item_embeddings, model.item_embeddings)
+        for user_id in range(len(users)):
+            np.testing.assert_array_equal(
+                loaded.user_vector(user_id),  # type: ignore[arg-type]
+                model.user_vector(user_id),  # type: ignore[arg-type]
+            )
+
+    def test_a_catalogue_of_the_wrong_size_is_rejected(self, tmp_path: Path) -> None:
+        """Mismatched shapes must raise, not silently shift every id."""
+        model, items, users = self._fitted(tmp_path)
+        path = tmp_path / "two_tower.npz"
+        model.save_serving_state(path)
+
+        with pytest.raises(ValueError, match="item embeddings"):
+            TwoTowerRecommender.load_serving_state(path, items=items.iloc[:-1], users=users)
+
+        with pytest.raises(ValueError, match="user embeddings"):
+            TwoTowerRecommender.load_serving_state(path, items=items, users=users.iloc[:-1])
+
+    def test_saving_without_user_embeddings_raises(self, tmp_path: Path) -> None:
+        """A file that can score no one is worse than no file at all."""
+        n_items, n_users = 24, 12
+        items, users = self._catalogue(n_items, n_users)
+        model = TwoTowerRecommender(n_users, n_items, items=items, users=users)
+        model._item_embeddings = np.zeros((n_items, 8), dtype=np.float32)
+        model._fitted = True
+
+        with pytest.raises(RuntimeError, match="user embeddings"):
+            model.save_serving_state(tmp_path / "two_tower.npz")
+
+    def test_a_user_who_was_never_encoded_has_no_vector(self, tmp_path: Path) -> None:
+        """None, not a zero vector.
+
+        Zero is a valid point in the space. Returning it would place a
+        cold-start user at the exact centre of the catalogue and let the
+        two-tower source contribute a slate of arbitrary items.
+        """
+        n_items, n_users, dim = 24, 12, 8
+        items, users = self._catalogue(n_items, n_users)
+        model = TwoTowerRecommender(n_users, n_items, items=items, users=users)
+        model._item_embeddings = np.zeros((n_items, dim), dtype=np.float32)
+        model._fitted = True
+
+        rng = np.random.default_rng(23)
+        encoded = np.array([0, 1, 2])
+        model.set_user_embeddings(encoded, rng.normal(size=(3, dim)).astype(np.float32))
+
+        assert model.user_vector(0) is not None
+        assert model.user_vector(7) is None, "never encoded"
+        assert model.user_vector(n_users + 5) is None, "out of range"
+        assert model.user_vector(-1) is None, "negative index must not wrap"

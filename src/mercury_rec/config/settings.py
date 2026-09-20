@@ -63,6 +63,16 @@ class Settings(BaseSettings):
 
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
     max_request_bytes: int = 1_048_576
+    load_artifacts_on_startup: bool = True
+    """Load the model bundle during application startup.
+
+    Off only where a bundle is supplied by other means: API contract tests
+    inject a small in-memory bundle and have no use for the real one, and
+    loading it costs roughly twenty seconds of model fitting per application
+    instance. A test suite slow enough that people stop running it protects
+    nothing.
+    """
+
     allow_as_of_override: bool = False
     """Permit an ``as_of`` query parameter on the recommendation endpoint.
 

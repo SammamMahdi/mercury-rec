@@ -14,6 +14,7 @@ from mercury_rec.api.schemas.recommendations import (
     EventIngestResponse,
     ModelsStatusResponse,
     ModelStatus,
+    PipelineTraceResponse,
     Recommendation,
     RecommendationExplanation,
     RecommendationResponse,
@@ -141,6 +142,73 @@ def recommend(
     )
     _record(result, endpoint="recommendations")
     return _to_response(result)
+
+
+@router.get(
+    "/recommendations/{user_id}/trace",
+    response_model=PipelineTraceResponse,
+    summary="Stage-by-stage membership for one request",
+)
+def recommend_trace(
+    engine: EngineDep,
+    request_id: RequestIdDep,
+    user_id: Annotated[str, Path(min_length=1, max_length=64)],
+    k: Annotated[int, Query(ge=1, le=100)] = 10,
+    hour: Annotated[int | None, Query(ge=0, le=23)] = None,
+    weekday: Annotated[int | None, Query(ge=0, le=6)] = None,
+    region_id: Annotated[int | None, Query(ge=0)] = None,
+    vertical: Annotated[int | None, Query(ge=0, le=5)] = None,
+) -> PipelineTraceResponse:
+    """Return which items each stage held, for the pipeline and galaxy views.
+
+    Counts alone say 600 candidates became 10 recommendations. Only the
+    membership says *which* 600, which is the difference between a diagram of
+    a funnel and a picture of one that ran.
+    """
+    result = engine.recommend(
+        user_id,
+        k=k,
+        context=RequestContext(hour=hour, weekday=weekday, region_id=region_id, vertical=vertical),
+        trace=True,
+    )
+    _record(result, endpoint="trace")
+
+    trace = result.trace
+    if trace is None:
+        # The cold-start path returns before retrieval runs, so there are no
+        # stages to report. An empty trace with the reason stated beats a 404
+        # for what is a normal, successful request.
+        return PipelineTraceResponse(
+            user_id=result.user_id,
+            request_id=result.request_id,
+            model_version=result.model_version,
+            generated_at=result.generated_at,
+            final_ids=[item.item_id for item in result.items],
+            latency=StageLatency(**result.timings.as_dict()),
+            is_cold_start=result.is_cold_start,
+            note=(
+                "Served by the cold-start path, which answers from contextual "
+                "popularity without running retrieval, so there are no stages "
+                "to trace."
+            ),
+        )
+
+    return PipelineTraceResponse(
+        user_id=result.user_id,
+        request_id=result.request_id,
+        model_version=result.model_version,
+        generated_at=result.generated_at,
+        candidate_ids=trace.candidate_ids,
+        candidate_sources=trace.candidate_sources,
+        ranked_ids=trace.ranked_ids,
+        ranked_scores=trace.ranked_scores,
+        final_ids=trace.final_ids,
+        latency=StageLatency(**result.timings.as_dict()),
+        n_candidates=result.n_candidates,
+        filtered=result.filtered,
+        is_cold_start=result.is_cold_start,
+        note="Uncached: a trace forces a full pipeline run.",
+    )
 
 
 @router.post(

@@ -399,6 +399,99 @@ class TwoTowerRecommender(Recommender):
         scores: np.ndarray = self._item_embeddings[candidates] @ user_vector
         return scores.astype(np.float32)
 
+    def save_serving_state(self, path: Path) -> None:
+        """Persist the two embedding matrices the serving path needs.
+
+        Serving a two-tower model does not require the towers. Both sides were
+        encoded offline and scoring is a dot product against the item matrix,
+        so a deployed replica loads two float arrays instead of rebuilding a
+        torch graph and a CUDA context. That asymmetry - expensive encoding
+        offline, cheap lookup online - is the reason the architecture exists.
+
+        The towers themselves are checkpointed separately by :meth:`save`,
+        because retraining and re-encoding a user whose features have moved
+        both need the real model.
+        """
+        self._require_fitted()
+        assert self._item_embeddings is not None
+        if self._user_embeddings is None:
+            raise RuntimeError(
+                "No user embeddings cached. Call set_user_embeddings() before saving "
+                "serving state, or the loaded model can score no one."
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            path,
+            item_embeddings=self._item_embeddings,
+            user_embeddings=self._user_embeddings,
+            embedding_dim=np.int32(self._item_embeddings.shape[1]),
+        )
+        logger.info(
+            "model.two_tower.serving_state_saved",
+            path=str(path),
+            users=int(self._user_embeddings.shape[0]),
+            items=int(self._item_embeddings.shape[0]),
+        )
+
+    @classmethod
+    def load_serving_state(
+        cls,
+        path: Path,
+        *,
+        items: pd.DataFrame,
+        users: pd.DataFrame,
+    ) -> TwoTowerRecommender:
+        """Rebuild a scoring-only recommender from persisted embeddings.
+
+        Raises:
+            ValueError: If the stored matrices do not match the catalogue this
+                process is serving. Shapes that disagree by one item would
+                otherwise shift every id by one and produce recommendations
+                that are wrong in a way nothing downstream can detect.
+        """
+        with np.load(path) as archive:
+            item_embeddings = archive["item_embeddings"].astype(np.float32)
+            user_embeddings = archive["user_embeddings"].astype(np.float32)
+
+        model = cls(
+            n_users=len(users),
+            n_items=len(items),
+            items=items,
+            users=users,
+        )
+        if item_embeddings.shape[0] != model.n_items:
+            raise ValueError(
+                f"{path} holds {item_embeddings.shape[0]} item embeddings but the "
+                f"catalogue has {model.n_items} items."
+            )
+        if user_embeddings.shape[0] != model.n_users:
+            raise ValueError(
+                f"{path} holds {user_embeddings.shape[0]} user embeddings but the "
+                f"dataset has {model.n_users} users."
+            )
+
+        model._item_embeddings = item_embeddings
+        model._user_embeddings = user_embeddings
+        model._fitted = True
+        logger.info("model.two_tower.serving_state_loaded", path=str(path))
+        return model
+
+    def user_vector(self, user_id: int) -> np.ndarray | None:
+        """Return one cached user embedding, or None if there is not one.
+
+        None rather than a zero vector for an unknown or never-encoded user.
+        A zero vector is a valid point in the space and would place a
+        cold-start user at its exact centre, which reads as a measurement
+        instead of an absence.
+        """
+        cache = self._user_embeddings
+        if cache is None or not 0 <= user_id < cache.shape[0]:
+            return None
+        vector: np.ndarray = cache[user_id]
+        if not np.any(vector):
+            return None
+        return vector.astype(np.float32)
+
     @property
     def item_embeddings(self) -> np.ndarray:
         """L2-normalised item embeddings backing the ANN index."""

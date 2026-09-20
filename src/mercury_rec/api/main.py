@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from mercury_rec import __version__
-from mercury_rec.api.routers import health, insights, recommendations
+from mercury_rec.api.routers import embeddings, health, insights, recommendations
 from mercury_rec.api.schemas.recommendations import ErrorResponse
 from mercury_rec.cache.redis_cache import RecommendationCache, build_client
 from mercury_rec.config.settings import Settings, get_settings
@@ -62,6 +62,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.engine = None
     app.state.startup_error = None
+
+    if not settings.load_artifacts_on_startup:
+        # A caller is providing the bundle. Say so rather than leaving
+        # /ready to report an ambiguous absence.
+        app.state.startup_error = "Artifact loading is disabled by configuration."
+        logger.info("api.artifact_loading_disabled")
+        yield
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
+        return
+
     try:
         from mercury_rec.recommender.engine import RecommendationEngine
         from mercury_rec.services.artifacts import load_bundle
@@ -181,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router, tags=["health"])
     app.include_router(recommendations.router, prefix="/api/v1", tags=["recommendations"])
     app.include_router(insights.router, prefix="/api/v1/insights", tags=["insights"])
+    app.include_router(embeddings.router, prefix="/api/v1/embeddings", tags=["embeddings"])
 
     return app
 

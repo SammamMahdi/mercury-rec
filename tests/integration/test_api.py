@@ -12,6 +12,7 @@ the startup smoke check in the QA gate, not here.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 
 import numpy as np
@@ -21,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from mercury_rec.api.main import REQUEST_ID_HEADER, create_app
 from mercury_rec.cache.redis_cache import RecommendationCache
+from mercury_rec.config.settings import get_settings
 from mercury_rec.core.enums import EventType
 from mercury_rec.features.asof import AsOfState
 from mercury_rec.features.store import AsOfFeatureStore
@@ -104,11 +106,33 @@ def bundle(interactions: pd.DataFrame, items: pd.DataFrame) -> ArtifactBundle:
     )
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _no_artifact_loading() -> Iterator[None]:
+    """Keep application startup from loading the real bundle.
+
+    Without this the module docstring is a lie: every `TestClient(app)` runs
+    the lifespan, which fits the retrieval models and reads the two-tower
+    embeddings from disk - roughly twenty seconds, per test. These tests
+    inject their own bundle a line later and never look at that one.
+    """
+    previous = os.environ.get("MERCURY_LOAD_ARTIFACTS_ON_STARTUP")
+    os.environ["MERCURY_LOAD_ARTIFACTS_ON_STARTUP"] = "false"
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("MERCURY_LOAD_ARTIFACTS_ON_STARTUP", None)
+        else:
+            os.environ["MERCURY_LOAD_ARTIFACTS_ON_STARTUP"] = previous
+        get_settings.cache_clear()
+
+
 @pytest.fixture
 def client(bundle: ArtifactBundle) -> Iterator[TestClient]:
     app = create_app()
     with TestClient(app) as test_client:
-        # Replace whatever startup loaded with the in-memory bundle.
+        # Startup deliberately loaded nothing; this is the bundle under test.
         app.state.engine = RecommendationEngine(bundle, cache=RecommendationCache())
         app.state.startup_error = None
         yield test_client
@@ -321,3 +345,146 @@ class TestOpenAPI:
         description = client.get("/openapi.json").json()["info"]["description"]
         assert "Retailrocket" in description
         assert "synthesised" in description
+
+
+class TestPipelineTrace:
+    """The stage-membership diagnostic behind the galaxy and pipeline views."""
+
+    def test_stages_narrow_and_nest(self, client: TestClient) -> None:
+        """Each stage must be a subset of the one before it.
+
+        This is the claim the whole funnel visualisation rests on. If a
+        returned item were not a candidate, the picture would be showing a
+        pipeline that did not run.
+        """
+        trace = client.get("/api/v1/recommendations/u_3/trace?k=5").json()
+
+        candidates = set(trace["candidate_ids"])
+        assert candidates, "a user with history should retrieve something"
+        assert set(trace["ranked_ids"]) == candidates, "ranking reorders, it does not filter"
+        assert set(trace["final_ids"]) <= candidates
+        assert len(trace["final_ids"]) <= 5
+
+    def test_ranked_scores_align_with_ranked_ids(self, client: TestClient) -> None:
+        """Parallel arrays that disagree would mislabel every bar in the UI."""
+        trace = client.get("/api/v1/recommendations/u_3/trace").json()
+        assert len(trace["ranked_scores"]) == len(trace["ranked_ids"])
+
+    def test_ranked_ids_are_in_descending_score_order(self, client: TestClient) -> None:
+        scores = client.get("/api/v1/recommendations/u_3/trace").json()["ranked_scores"]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_sources_only_claim_items_that_are_candidates(self, client: TestClient) -> None:
+        """A source cannot be credited with an item fusion dropped."""
+        trace = client.get("/api/v1/recommendations/u_3/trace").json()
+        candidates = set(trace["candidate_ids"])
+        for source, ids in trace["candidate_sources"].items():
+            assert set(ids) <= candidates, f"{source} claims non-candidates"
+
+    def test_excludes_items_the_user_already_interacted_with(
+        self, client: TestClient, interactions: pd.DataFrame
+    ) -> None:
+        seen = set(interactions.loc[interactions["user_id"] == 3, "item_id"].tolist())
+        trace = client.get("/api/v1/recommendations/u_3/trace").json()
+        assert not (set(trace["candidate_ids"]) & seen)
+
+    def test_an_unknown_user_reports_cold_start_rather_than_failing(
+        self, client: TestClient
+    ) -> None:
+        """A cold-start request is successful, it just has no stages."""
+        response = client.get("/api/v1/recommendations/nobody/trace")
+        assert response.status_code == 200
+
+        trace = response.json()
+        assert trace["is_cold_start"] is True
+        assert trace["candidate_ids"] == []
+        assert trace["final_ids"], "cold start still answers"
+        assert "cold-start" in trace["note"]
+
+    def test_a_trace_is_never_served_from_cache(self, client: TestClient) -> None:
+        """Warm the cache through the normal endpoint, then demand a trace.
+
+        A cached payload carries no stage membership. If the trace endpoint
+        honoured the cache it would have to either return empty stages or
+        invent them from the final list, and inventing them would draw a
+        funnel that never ran.
+        """
+        client.get("/api/v1/recommendations/u_3?k=5")
+        trace = client.get("/api/v1/recommendations/u_3/trace?k=5").json()
+        assert trace["candidate_ids"], "stages must be populated despite a warm cache"
+
+
+class TestSampleUsers:
+    def test_returns_real_ids_that_the_api_accepts(self, client: TestClient) -> None:
+        """The ids must round-trip, or the picker leads nowhere."""
+        users = client.get("/api/v1/insights/sample-users?n=4").json()["users"]
+        assert users
+
+        for user in users:
+            response = client.get(f"/api/v1/recommendations/{user['user_id']}?k=3")
+            assert response.status_code == 200
+            assert response.json()["is_cold_start"] is False
+
+    def test_spans_the_activity_distribution(self, client: TestClient) -> None:
+        """Sampling only the busiest users would show the easiest case."""
+        users = client.get("/api/v1/insights/sample-users?n=5").json()["users"]
+        counts = [user["history_items"] for user in users]
+
+        assert counts == sorted(counts, reverse=True)
+        assert counts[0] > counts[-1], "every sampled user has identical history"
+
+    def test_respects_the_requested_count(self, client: TestClient) -> None:
+        assert len(client.get("/api/v1/insights/sample-users?n=3").json()["users"]) <= 3
+
+    def test_rejects_an_absurd_count(self, client: TestClient) -> None:
+        assert client.get("/api/v1/insights/sample-users?n=5000").status_code == 422
+
+
+class TestSessionAwareColdStart:
+    """An anonymous visitor's session is the only signal they carry.
+
+    Serving the same popularity slate to every anonymous request throws that
+    signal away. These tests pin the behaviour that uses it, and the boundary
+    where it correctly falls back.
+    """
+
+    @staticmethod
+    def _recommend(client: TestClient, session_items: list[int]) -> list[int]:
+        response = client.post(
+            "/api/v1/session/recommend",
+            json={"session_items": session_items, "k": 8, "context": {}},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["is_cold_start"] is True, "no user id means the cold-start path"
+        return [item["item_id"] for item in payload["recommendations"]]
+
+    def test_a_session_changes_an_anonymous_slate(self, client: TestClient) -> None:
+        generic = self._recommend(client, [])
+        personalised = self._recommend(client, [3, 4, 5])
+        assert generic != personalised, "the session made no difference"
+
+    def test_different_sessions_give_different_slates(self, client: TestClient) -> None:
+        assert self._recommend(client, [1, 2]) != self._recommend(client, [30, 31])
+
+    def test_items_in_the_session_are_not_recommended_back(self, client: TestClient) -> None:
+        """Recommending what someone is looking at right now is not a result."""
+        session = [7, 8, 9]
+        assert not (set(self._recommend(client, session)) & set(session))
+
+    def test_an_empty_session_still_returns_a_full_slate(self, client: TestClient) -> None:
+        assert len(self._recommend(client, [])) == 8
+
+    def test_unknown_item_ids_fall_back_rather_than_failing(self, client: TestClient) -> None:
+        """Out-of-range ids must not poison the request.
+
+        A client can send an id from a stale catalogue. The honest response is
+        the generic slate, not a 500 and not a slate ranked by a zero vector.
+        """
+        generic = self._recommend(client, [])
+        assert self._recommend(client, [999_999, -3]) == generic
+
+    def test_the_slate_is_deterministic(self, client: TestClient) -> None:
+        """Same session, same answer. Session requests are never cached, so
+        this is the engine being deterministic rather than a cache hit."""
+        assert self._recommend(client, [3, 4, 5]) == self._recommend(client, [3, 4, 5])
