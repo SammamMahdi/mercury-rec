@@ -45,10 +45,12 @@ data_app = typer.Typer(
     name="data", help="Dataset acquisition and preparation.", no_args_is_help=True
 )
 features_app = typer.Typer(name="features", help="Feature engineering.", no_args_is_help=True)
+train_app = typer.Typer(name="train", help="Model training and evaluation.", no_args_is_help=True)
 
 app.add_typer(env_app)
 app.add_typer(data_app)
 app.add_typer(features_app)
+app.add_typer(train_app)
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 
@@ -215,6 +217,36 @@ def features_build(
     for split, rows in result.rows_per_split.items():
         console.print(f"  {split:<12} {rows:>9,} rows")
     console.print(f"  features {len(result.metadata['feature_columns'])} columns")
+
+
+# ---------------------------------------------------------------------------
+# train
+# ---------------------------------------------------------------------------
+
+
+@train_app.command("baselines")
+def train_baselines(
+    preset: Annotated[str, typer.Option("--preset", "-p", help="Dataset preset.")] = "full",
+    split: Annotated[str, typer.Option("--split", help="Evaluation split.")] = "test",
+    max_users: Annotated[
+        int | None, typer.Option("--max-users", help="Sample N evaluation users.")
+    ] = None,
+    quick: Annotated[
+        bool, typer.Option("--quick", help="Shorten neural training (smoke test).")
+    ] = False,
+) -> None:
+    """Fit and evaluate every retrieval model under one protocol."""
+    from mercury_rec.pipelines.train_baselines import format_table, run_baselines
+
+    result = run_baselines(preset=preset, split=split, max_users=max_users, quick=quick)
+    payload = result.payload
+
+    console.print(
+        f"\n[bold]Model comparison[/bold]  preset={payload['preset']} split={payload['split']}  "
+        f"users_scored={payload['users_scored']:,}  dataset={payload['dataset_hash']}"
+    )
+    console.print(format_table(payload, k=10))
+    console.print(f"\n[green]Saved[/green] {result.output_path}")
 
 
 if __name__ == "__main__":

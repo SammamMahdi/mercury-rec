@@ -8,9 +8,20 @@
 !/data/.gitkeep
 !/data/README.md
 
-# Model artifacts, indexes, embeddings
-/artifacts/
+# Model artifacts, indexes, embeddings.
+# Excluding the CONTENTS rather than the directory itself, because git will
+# not descend into an excluded directory and a later negation cannot re-include
+# anything inside it.
+/artifacts/*
 !/artifacts/.gitkeep
+# Evaluation results ARE committed: they are aggregate metrics, not a
+# derivative of the CC BY-NC-SA dataset, and every number quoted in the README
+# or the frontend must be traceable to a file in this repository.
+!/artifacts/evaluation/
+# ...but never the heavy binaries that may land beside them.
+/artifacts/evaluation/**/*.pkl
+/artifacts/evaluation/**/*.npy
+/artifacts/evaluation/**/*.pt
 /mlruns/
 mlflow.db
 *.pt
