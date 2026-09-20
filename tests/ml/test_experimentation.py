@@ -41,7 +41,7 @@ class TestPairedBootstrap:
         control = rng.random(300)
         treatment = control + 0.2  # unambiguous, uniform improvement
 
-        lower, upper, p_value = paired_bootstrap(control, treatment)
+        lower, _upper, p_value = paired_bootstrap(control, treatment)
         assert lower > 0, "a consistent +0.2 shift should not include zero"
         assert p_value < 0.05
 
@@ -50,7 +50,7 @@ class TestPairedBootstrap:
         control = rng.random(200) + 0.3
         treatment = rng.random(200)  # worse on average
 
-        lower, upper, _ = paired_bootstrap(control, treatment)
+        _lower, upper, _ = paired_bootstrap(control, treatment)
         assert upper < 0, "a regression must produce a negative interval"
 
     def test_p_value_is_never_exactly_zero(self) -> None:
